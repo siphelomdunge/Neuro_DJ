@@ -1,5 +1,6 @@
 """
 Decision Core — Intent generation and option evaluation.
+V49.2 — Fixed thread safety and error handling
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
@@ -254,41 +255,72 @@ class DecisionCore:
         Returns:
             DecisionRecord with chosen option and alternatives
         """
-        # Generate intent
-        set_snapshot = (self.set_state_model.get_snapshot()
-                       if self.set_state_model else None)
+        try:
+            # Generate intent
+            set_snapshot = (self.set_state_model.get_snapshot()
+                           if self.set_state_model else None)
+            
+            intent = self.intent_engine.build_intent(
+                current_track, set_snapshot, energy_history,
+                transition_history, set_duration_remaining
+            )
+            
+            # Generate candidate options
+            options = self._generate_options(candidate_tracks)
+            
+            # Evaluate each option
+            evaluated = []
+            for option in options:
+                try:
+                    ev = self._evaluate_option(
+                        option, intent, current_track, current_pos_a,
+                        track_a_dur, master_bpm, spb, mix_count
+                    )
+                    if ev:
+                        evaluated.append(ev)
+                except Exception as e:
+                    print(f"⚠️ Option evaluation failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # Sort by score
+            evaluated.sort(key=lambda x: x.final_score, reverse=True)
+            chosen = evaluated[0] if evaluated else None
+            
+            return DecisionRecord(
+                intent=intent,
+                chosen=chosen,
+                alternatives=evaluated,
+                timestamp=self._now()
+            )
         
-        intent = self.intent_engine.build_intent(
-            current_track, set_snapshot, energy_history,
-            transition_history, set_duration_remaining
-        )
-        
-        # Generate candidate options
-        options = self._generate_options(candidate_tracks)
-        
-        # Evaluate each option
-        evaluated = []
-        for option in options:
-            try:
-                ev = self._evaluate_option(
-                    option, intent, current_track, current_pos_a,
-                    track_a_dur, master_bpm, spb, mix_count
-                )
-                if ev:
-                    evaluated.append(ev)
-            except Exception as e:
-                print(f"⚠️ Option evaluation failed: {e}")
-        
-        # Sort by score
-        evaluated.sort(key=lambda x: x.final_score, reverse=True)
-        chosen = evaluated[0] if evaluated else None
-        
-        return DecisionRecord(
-            intent=intent,
-            chosen=chosen,
-            alternatives=evaluated,
-            timestamp=self._now()
-        )
+        except Exception as e:
+            print(f"💀 CRITICAL: decide_next_action crashed: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Return emergency fallback decision
+            fallback_opt = CandidateOption("hold", None, 16.0)
+            fallback_eval = EvaluatedOption(
+                option=fallback_opt,
+                final_score=0.0,
+                intent_fit=0.0,
+                transition_opportunity=0.0,
+                global_compat=0.0,
+                robustness=0.0,
+                execution_risk=1.0,
+                future_flex=0.0,
+                reasoning=["EMERGENCY_FALLBACK_DUE_TO_CRASH"],
+                assumptions={},
+                draft_plan=None
+            )
+            
+            return DecisionRecord(
+                intent=Intent("recovery", 0, 0, 0, "low", "low", [], [], 1.0),
+                chosen=fallback_eval,
+                alternatives=[fallback_eval],
+                timestamp=self._now()
+            )
     
     def _generate_options(self, candidate_tracks: List[dict]) -> List[CandidateOption]:
         """Generate candidate options (transitions + holds)."""
@@ -392,6 +424,7 @@ class DecisionCore:
             best_a_exit, best_b_entry, overlap_score, all_candidates = \
                 self.searcher.search(current_track, tb, b_ratio, search_dur, spb, quiet=True)
         except Exception as e:
+            print(f"⚠️ Searcher failed: {e}")
             best_a_exit = track_a_dur - 15.0
             best_b_entry = 0.0
             overlap_score = {'total': 0.1, 'harmonic': 0.5, 'vocal': 0.5}
