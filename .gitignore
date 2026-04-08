@@ -1,0 +1,50 @@
+# ==========================================
+# NEURO-DJ .GITIGNORE
+# ==========================================
+
+# 1. Python Virtual Environments (CRITICAL: Prevents 25,000+ file uploads)
+neuro_env/
+venv/
+env/
+
+# 2. Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# 3. Audio Files & Crate Folders (CRITICAL: Do NOT upload your music!)
+Music/
+*.wav
+*.mp3
+*.flac
+*.aiff
+*.ogg
+*.m4a
+
+# 4. Compiled C++ Extensions & Build Artifacts
+*.so
+*.pyd
+*.dll
+*.dylib
+*.o
+*.obj
+build/
+neuro_core.cpython-*
+
+# 5. Neuro-DJ Dynamic Data & Temp Files
+temp_sync_deck_*.wav
+temp_deck_a_*.wav
+neuro_brain_memory.json
+neuro_confidence.json
+transition_log.json
+set_state_log.json
+master_library.json
+logs/
+intelligent_v1/
+
+# 6. IDE and OS Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
