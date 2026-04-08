@@ -17,20 +17,20 @@ from .warp import RunwayExhausted
 @dataclass
 class TransitionPlan:
     """Finalized transition plan ready for execution."""
-    fnb: str                    # Warped track B file path
-    b_ratio: float              # Time-stretch ratio applied
-    b_start_w: float            # Track B entry point (warped time)
-    mix_trigger: float          # Track A position to start transition
-    trans_dur: float            # Transition duration (seconds)
-    tech_name: str              # Technique name
-    mem_key: str                # ML memory key
-    recipe: Dict                # Recipe parameters
-    track_b_dur: float          # Physical duration of warped track B
-    overlap_score: Dict         # Overlap scoring results
-    ctx: Dict                   # Transition context
-    assumptions: Dict           # Planning assumptions
-    master_bpm: float           # Master BPM
-    acapella_method: str        # Acapella extraction method
+    fnb: str
+    b_ratio: float
+    b_start_w: float
+    mix_trigger: float
+    trans_dur: float
+    tech_name: str
+    mem_key: str
+    recipe: Dict
+    track_b_dur: float
+    overlap_score: Dict
+    ctx: Dict
+    assumptions: Dict
+    master_bpm: float
+    acapella_method: str
     
     def update_duration(self, new_dur: float, spb: float):
         """
@@ -42,7 +42,30 @@ class TransitionPlan:
         """
         self.trans_dur = new_dur
         self.recipe['beats'] = new_dur / spb
-
+    
+    def to_dict(self) -> dict:
+        """
+        Convert TransitionPlan to dictionary for backward compatibility.
+        
+        Returns:
+            Dict representation of plan
+        """
+        return {
+            'fnb': self.fnb,
+            'b_ratio': self.b_ratio,
+            'b_start_w': self.b_start_w,
+            'mix_trigger': self.mix_trigger,
+            'trans_dur': self.trans_dur,
+            'tech_name': self.tech_name,
+            'mem_key': self.mem_key,
+            'recipe': self.recipe,
+            'track_b_dur': self.track_b_dur,
+            'overlap_score': self.overlap_score,
+            'ctx': self.ctx,
+            'assumptions': self.assumptions,
+            'master_bpm': self.master_bpm,  # ✅ Use attribute name, not _master_bpm
+            'acapella_method': self.acapella_method,
+        }
 
 class TransitionPlanner:
     """Finalizes transition plans with EOF validation."""
