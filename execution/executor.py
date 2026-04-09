@@ -1,6 +1,6 @@
 """
 Transition execution and real-time monitoring.
-V49.2 — Production hardened with guaranteed termination
+V49.6 — STABLE VERSION (no stop-and-go bug)
 """
 from __future__ import annotations
 import time
@@ -25,9 +25,6 @@ except ImportError:
 
 class TransitionExecutor:
     """Executes transitions with real-time adaptation."""
-    
-    # ✅ Absolute maximum transition duration (safety net)
-    MAX_TRANSITION_DURATION = 300.0  # 5 minutes absolute max
     
     def __init__(self, mixer, master_bpm_fn, is_paused_fn, sleep_pausable_fn):
         """
@@ -174,55 +171,25 @@ class TransitionExecutor:
             except Exception:
                 pass
         
-        # ✅ FIX: Pre-check mixer state before triggering
-        if self.mixer.is_transitioning():
-            print("   ⚠️  WARNING: Mixer already transitioning! Forcing reset...")
-            try:
-                self.mixer.pause("A")
-                self.mixer.pause("B")
-                time.sleep(0.2)
-                self.mixer.play("A")
-            except Exception as e:
-                print(f"   ⚠️  Reset failed: {e}")
+        print(f"   🎬 Triggering transition: {plan.trans_dur:.1f}s, {recipe['beats']:.0f} beats")
         
-        print(f"\n{'='*60}")
-        print(f"🎬 TRIGGERING HYBRID TRANSITION")
-        print(f"{'='*60}")
-        print(f"Technique:       {plan.tech_name} (ID: {recipe['technique_id']})")
-        print(f"Duration:        {plan.trans_dur:.1f}s")
-        print(f"Beats:           {recipe['beats']:.0f}")
-        print(f"Bass Swap:       {recipe['bass']:.2f}")
-        print(f"Echo:            {recipe.get('echo', 0.0):.2f}")
-        print(f"Wash:            {recipe.get('wash', 0.0):.2f}")
-        print(f"BPM:             {master_bpm:.1f}")
-        print(f"{'='*60}\n")
-        
-        # ✅ CRITICAL: Trigger transition in C++ mixer
-        try:
-            self.mixer.trigger_hybrid_transition(
-                plan.trans_dur,
-                recipe['beats'],
-                recipe['bass'],
-                recipe.get('echo', 0.0),
-                recipe.get('stutter', 0.0),
-                recipe.get('wash', 0.0),
-                float(master_bpm),
-                float(recipe.get('piano_hold', 0.0)),
-                recipe['technique_id'],
-                random.uniform(1.8, 3.2),     # wobble_f1
-                random.uniform(4.5, 7.5),     # wobble_f2
-                random.uniform(0.0, 6.28),    # wobble_p1
-                random.uniform(0.0, 6.28),    # wobble_p2
-                max(0.005, min(0.020, random.gauss(0.010, 0.003))),  # wobble_amp
-            )
-            
-            print("✅ Transition triggered in C++ mixer")
-            
-        except Exception as e:
-            print(f"💀 CRITICAL: Failed to trigger transition in mixer: {e}")
-            import traceback
-            traceback.print_exc()
-            raise
+        # Trigger transition in C++ mixer
+        self.mixer.trigger_hybrid_transition(
+            plan.trans_dur,
+            recipe['beats'],
+            recipe['bass'],
+            recipe['echo'],
+            0.0,  # stutter (unused)
+            recipe['wash'],
+            float(master_bpm),
+            float(recipe.get('piano_hold', 0.0)),
+            recipe['technique_id'],
+            random.uniform(1.8, 3.2),   # wobble_f1
+            random.uniform(4.5, 7.5),   # wobble_f2
+            random.uniform(0.0, 6.28),  # wobble_p1
+            random.uniform(0.0, 6.28),  # wobble_p2
+            max(0.005, min(0.020, random.gauss(0.010, 0.003))),  # wobble_amp
+        )
         
         # Start live ears if available
         if LIVE_EARS_AVAILABLE:
@@ -234,114 +201,25 @@ class TransitionExecutor:
                 print(f"   ⚠️ LiveEars failed to start: {e}")
                 self._ears = None
         
-        # ✅ FIX: Extended pickup detection with multi-signal monitoring
-        pickup_deadline = time.time() + 10.0  # Increased from 3s to 10s
+        # Wait for transition to start (simple single-signal detection)
+        pickup_deadline = time.time() + 3.0
         transition_started = False
-        check_count = 0
-        
-        print(f"⏳ Waiting for mixer to pick up transition...")
         
         while time.time() < pickup_deadline:
-            check_count += 1
-            
-            # ✅ Multi-signal detection (v6.2 feature)
-            is_trans = self.mixer.is_transitioning()
-            vol_a = self.mixer.get_volume("A")
-            vol_b = self.mixer.get_volume("B")
-            
-            # Accept if ANY of these conditions are met:
-            # 1. Transition flag is set
-            # 2. Volume B has started rising from 0
-            # 3. Volume A has started falling from 1.0
-            if is_trans or vol_b > 0.01 or vol_a < 0.99:
+            if self.mixer.is_transitioning():
                 transition_started = True
-                print(f"✅ Transition picked up after {check_count} checks "
-                      f"(is_trans={is_trans}, vol_A={vol_a:.3f}, vol_B={vol_b:.3f})")
                 break
-            
-            # Log every second
-            if check_count % 100 == 0:
-                elapsed = time.time() - (pickup_deadline - 10.0)
-                print(f"⏱️  Still waiting... {elapsed:.1f}s "
-                      f"(is_trans={is_trans}, vol_A={vol_a:.3f}, vol_B={vol_b:.3f})")
-            
             time.sleep(0.01)
         
         if not transition_started:
-            print(f"\n{'='*60}")
-            print(f"🚨 CRITICAL: Mixer failed to start transition after 10s!")
-            print(f"{'='*60}")
-            print(f"Final state:")
-            print(f"  - is_transitioning: {self.mixer.is_transitioning()}")
-            print(f"  - Volume A: {self.mixer.get_volume('A'):.3f}")
-            print(f"  - Volume B: {self.mixer.get_volume('B'):.3f}")
-            print(f"  - Callback heartbeat: {self.mixer.get_callback_heartbeat()}")
-            print(f"  - Lock failures: {self.mixer.get_lock_failure_count()}")
-            print(f"{'='*60}\n")
-            
-            print(f"🔧 Attempting emergency recovery...")
-            
-            # ✅ Try restarting the transition
+            print("   🚨 WARNING: Mixer did not start transition! Forcing manual crossfade.")
+            self.mixer.play("B")
+            self.mixer.set_volume("B", 1.0)
             time.sleep(0.5)
-            try:
-                self.mixer.trigger_hybrid_transition(
-                    plan.trans_dur,
-                    recipe['beats'],
-                    recipe['bass'],
-                    recipe.get('echo', 0.0),
-                    recipe.get('stutter', 0.0),
-                    recipe.get('wash', 0.0),
-                    float(master_bpm),
-                    float(recipe.get('piano_hold', 0.0)),
-                    recipe['technique_id'],
-                    random.uniform(1.8, 3.2),
-                    random.uniform(4.5, 7.5),
-                    random.uniform(0.0, 6.28),
-                    random.uniform(0.0, 6.28),
-                    max(0.005, min(0.020, random.gauss(0.010, 0.003))),
-                )
-                
-                print("   🔄 Retry trigger sent")
-                
-                # Wait another 5 seconds
-                retry_deadline = time.time() + 5.0
-                while time.time() < retry_deadline:
-                    if (self.mixer.is_transitioning() or 
-                        self.mixer.get_volume("B") > 0.01):
-                        print(f"   ✅ Retry successful!")
-                        transition_started = True
-                        break
-                    time.sleep(0.01)
-            
-            except Exception as e:
-                print(f"   💀 Retry failed: {e}")
-            
-            if not transition_started:
-                # Last resort: manual crossfade
-                print(f"\n{'='*60}")
-                print(f"🆘 LAST RESORT: Manual crossfade")
-                print(f"{'='*60}\n")
-                
-                try:
-                    self.mixer.play("B")
-                    
-                    # Manual fade over 2 seconds
-                    steps = 100
-                    for i in range(steps):
-                        progress = i / steps
-                        self.mixer.set_volume("A", 1.0 - progress)
-                        self.mixer.set_volume("B", progress)
-                        time.sleep(0.02)
-                    
-                    self.mixer.pause("A")
-                    print("   ✅ Manual crossfade complete")
-                    return True
-                
-                except Exception as e:
-                    print(f"   💀 Manual crossfade failed: {e}")
-                    return True
+            self.mixer.pause("A")
+            return True
         
-        # ✅ Monitor transition
+        # Monitor transition
         handoff_forced = self._monitor_transition(plan, telemetry)
         
         # Cleanup
@@ -365,9 +243,9 @@ class TransitionExecutor:
         
         try:
             if ADAPTIVE_EXECUTOR_AVAILABLE and self._ears is not None:
-                # Adaptive executor path
+                # Use adaptive executor
                 adapt_log = AdaptiveExecutor(
-                    self.mixer, self._ears, plan.to_dict(), spb, telemetry
+                    self.mixer, self._ears, plan, spb, telemetry
                 ).run()
                 
                 if getattr(adapt_log, 'handoff_forced', False):
@@ -380,15 +258,43 @@ class TransitionExecutor:
                     
                     return True
                 else:
-                    # Wait for mixer to settle
-                    settle_deadline = time.time() + 5.0
+                    # Wait for normal completion
+                    settle_deadline = time.time() + 15.0
                     while self.mixer.is_transitioning() and time.time() < settle_deadline:
                         time.sleep(0.02)
                     
                     return False
             else:
-                # ✅ Hardened fallback monitoring
-                return self._fallback_monitor(plan, spb)
+                # Fallback: simple timeout-based monitoring
+                if not self.mixer.is_transitioning():
+                    return False
+                
+                # Deadline: expected duration + 15s grace period
+                deadline = time.time() + plan.trans_dur + 15.0
+                
+                while self.mixer.is_transitioning() and time.time() < deadline:
+                    if self.is_paused_fn():
+                        time.sleep(0.02)
+                        deadline += 0.02  # Extend deadline during pause
+                        continue
+                    
+                    # Emergency handoff check (EOF protection)
+                    try:
+                        pos_a = self.mixer.get_position("A")
+                        remaining_a = plan.trans_dur - (pos_a - plan.mix_trigger)
+                        
+                        if remaining_a < EMERGENCY_HANDOFF_THRESHOLD:
+                            print(f"   🚨 EMERGENCY HANDOFF: Track A has {remaining_a:.1f}s left!")
+                            self.mixer.set_volume("A", 0.0)
+                            self.mixer.set_volume("B", 1.0)
+                            self.mixer.pause("A")
+                            return True
+                    except Exception:
+                        pass
+                    
+                    time.sleep(0.02)
+                
+                return False
         
         finally:
             # Always clear acapella mode
@@ -397,129 +303,6 @@ class TransitionExecutor:
                 self.mixer.set_acapella_mode("B", 0.0)
             except Exception:
                 pass
-    
-    def _fallback_monitor(self, plan, spb: float) -> bool:
-        """
-        Fallback monitoring with guaranteed termination.
-        
-        ✅ FIX: Multiple escape hatches to prevent infinite loop
-        
-        Returns:
-            True if emergency handoff was triggered
-        """
-        # ✅ Three-layer timeout strategy
-        expected_duration = plan.trans_dur
-        grace_period = 15.0  # Extra time for mixer settle
-        absolute_max = min(self.MAX_TRANSITION_DURATION, expected_duration + 60.0)
-        
-        # Deadline 1: Expected end + grace period
-        normal_deadline = time.time() + expected_duration + grace_period
-        
-        # Deadline 2: Absolute maximum (fallback if clock issues)
-        absolute_deadline = time.time() + absolute_max
-        
-        print(f"⏱️  Monitoring transition: {expected_duration:.1f}s "
-              f"(grace={grace_period:.1f}s, max={absolute_max:.1f}s)")
-        
-        loop_iterations = 0
-        max_iterations = int((absolute_max / 0.02) * 1.5)  # 1.5x safety factor
-        
-        start_time = time.time()
-        emergency_handoff_triggered = False
-        last_log_time = start_time
-        
-        while True:
-            loop_iterations += 1
-            current_time = time.time()
-            elapsed = current_time - start_time
-            
-            # ✅ ESCAPE HATCH 1: Iteration count (prevent infinite loop)
-            if loop_iterations > max_iterations:
-                print(f"\n🚨 LOOP OVERFLOW: Exceeded {max_iterations} iterations, forcing exit")
-                self._force_handoff()
-                return True
-            
-            # ✅ ESCAPE HATCH 2: Absolute time deadline
-            if current_time > absolute_deadline:
-                print(f"\n🚨 ABSOLUTE TIMEOUT: {elapsed:.1f}s exceeded max {absolute_max:.1f}s")
-                self._force_handoff()
-                return True
-            
-            # ✅ ESCAPE HATCH 3: Normal completion
-            if not self.mixer.is_transitioning():
-                if elapsed > (expected_duration * 0.5):  # At least 50% through
-                    print(f"✅ Transition completed normally after {elapsed:.1f}s")
-                    return emergency_handoff_triggered
-                elif elapsed < 1.0:
-                    # Mixer cleared flag too early — give it another chance
-                    time.sleep(0.5)
-                    if not self.mixer.is_transitioning():
-                        print(f"⚠️  Mixer exited early ({elapsed:.1f}s), accepting completion")
-                        return emergency_handoff_triggered
-                else:
-                    print(f"⚠️  Mixer exited after {elapsed:.1f}s, accepting completion")
-                    return emergency_handoff_triggered
-            
-            # ✅ ESCAPE HATCH 4: Normal deadline
-            if current_time > normal_deadline:
-                print(f"\n⚠️  Grace period expired ({elapsed:.1f}s), forcing handoff")
-                self._force_handoff()
-                return True
-            
-            # Handle pause
-            if self.is_paused_fn():
-                time.sleep(0.02)
-                # Extend deadlines during pause
-                normal_deadline += 0.02
-                absolute_deadline += 0.02
-                continue
-            
-            # Periodic progress logging
-            if current_time - last_log_time >= 5.0:
-                remaining = expected_duration - elapsed
-                print(f"⏱️  Transition progress: {elapsed:.1f}s / {expected_duration:.1f}s "
-                      f"({remaining:.1f}s remaining)")
-                last_log_time = current_time
-            
-            # Emergency handoff check (EOF protection)
-            try:
-                pos_a = self.mixer.get_position("A")
-                time_in_transition = elapsed
-                remaining_transition = max(0, expected_duration - time_in_transition)
-                
-                # ✅ Simple EOF check: if we're past trigger + duration, force handoff
-                if pos_a > plan.mix_trigger + expected_duration:
-                    print(f"\n🚨 EMERGENCY HANDOFF: Past expected end point")
-                    self._force_handoff()
-                    emergency_handoff_triggered = True
-                    return True
-                
-                # Original emergency logic
-                if remaining_transition < EMERGENCY_HANDOFF_THRESHOLD:
-                    if not emergency_handoff_triggered:
-                        print(f"\n🚨 EMERGENCY HANDOFF: Only {remaining_transition:.1f}s left in transition")
-                        self._force_handoff()
-                        emergency_handoff_triggered = True
-                        # Don't return yet — let it finish the remaining time
-            
-            except Exception as e:
-                print(f"   ⚠️  Position check failed: {e}")
-            
-            time.sleep(0.02)
-        
-        # Should never reach here, but just in case
-        print(f"🚨 FALLTHROUGH: Exited monitor loop unexpectedly")
-        return emergency_handoff_triggered
-    
-    def _force_handoff(self):
-        """Force immediate handoff to deck B."""
-        try:
-            self.mixer.set_volume("A", 0.0)
-            self.mixer.set_volume("B", 1.0)
-            self.mixer.pause("A")
-            print(f"🔀 Forced handoff: A muted, B at 100%")
-        except Exception as e:
-            print(f"⚠️  Force handoff failed: {e}")
     
     def post_transition_sleep(self, tech_name: str):
         """
@@ -530,5 +313,3 @@ class TransitionExecutor:
         """
         if tech_name in IMMEDIATE_TECHNIQUES:
             self.sleep_pausable(4.0)
-        else:
-            self.sleep_pausable(1.5)

@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
 """
-Neuro-DJ V49.4 PRODUCTION
+Neuro-DJ V49.8 — Ping-Pong Deck Architecture
 Main orchestrator and entry point.
 
-CRITICAL FIXES:
-- Fixed executor.trigger_transition() call (missing parentheses causing method ref instead of call)
-- Added heartbeat diagnostic on transition failure
-- Enhanced emergency recovery pathway
-- Improved transition monitoring logs
+CHANGELOG:
+  V49.8: REVOLUTIONARY FIX - Eliminated deck swapping entirely
+    - Decks now ping-pong: A→B, then B→A, then A→B, etc.
+    - Each deck maintains its own clean state
+    - No more volume bugs from state copying
+    - Simpler, more reliable architecture
+    - Tracks stay on their deck until next transition
+  
+  V49.7: Fixed volume state after deck swap
+    - Volumes now properly reset after swap_decks()
+  
+  V49.0: Complete modular refactor
+    - Split 1500-line monolith into 12 focused modules
+    - Thread-safe by design with proper lock scoping
+    - Type hints and docstrings on all public APIs
 """
 from __future__ import annotations
 import sys
@@ -74,24 +84,38 @@ except ImportError:
 
 
 class NeuroDJ(QObject):
+    """
+    Main orchestrator for Neuro-DJ.
+    Coordinates all subsystems and manages the set lifecycle.
+    """
     
     request_rating = pyqtSignal(str, object, object)
     
     def __init__(self, library_json: str):
+        """
+        Initialize Neuro-DJ orchestrator.
+        
+        Args:
+            library_json: Path to master library JSON
+        """
         super().__init__()
         
+        # Core components
         self.mixer = neuro_core.NeuroMixer()
         self.brain = DJBrain()
         self.dataset = TransitionDataset()
         self.searcher = PhraseCandidateSearch()
         self.warper = TrackWarper()
         
+        # Thread pools
         self._analysis_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         self._learn_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         
+        # State locks
         self._set_state_lock = threading.Lock()
         self._tx_lock = threading.Lock()
         
+        # Track state
         self.track_a_dur = DEFAULT_TRACK_DURATION
         self.track_b_dur = DEFAULT_TRACK_DURATION
         self.track_a_name = "Loading..."
@@ -103,15 +127,23 @@ class NeuroDJ(QObject):
         self.mix_count = 0
         self.energy_history = []
         
+        # ✅ V49.8: Ping-Pong deck tracking
+        self.active_deck = "A"  # Which deck is currently playing
+        self.next_deck = "B"    # Which deck to load next track on
+        
+        # Transition tracking
         self._pending_tx_id = None
         self._load_failures = set()
         
+        # Pause tracking
         self._total_pause_time = 0.0
         self._pause_start_time = 0.0
         self.is_paused = False
         
+        # Set parameters
         self.target_set_duration = 3600.0
         
+        # Load crate
         with open(library_json, 'r') as f:
             self.crate = json.load(f)
         
@@ -121,6 +153,7 @@ class NeuroDJ(QObject):
                 t['_duration'] = (librosa.get_duration(path=fn)
                                  if os.path.exists(fn) else DEFAULT_TRACK_DURATION)
         
+        # Optional components
         if SET_STATE_AVAILABLE:
             self.set_state = SetStateModel()
         else:
@@ -131,6 +164,7 @@ class NeuroDJ(QObject):
         else:
             self.crate_ranker = None
         
+        # Decision core
         self.decision_core = DecisionCore(
             brain=self.brain,
             searcher=self.searcher,
@@ -139,8 +173,9 @@ class NeuroDJ(QObject):
             set_state_model=self.set_state,
             now_fn=time.time
         )
-        self.decision_core.dj = self
+        self.decision_core.dj = self  # Back-reference for BPM access
         
+        # Execution components
         self.planner = TransitionPlanner(
             mixer=self.mixer,
             warper=self.warper,
@@ -157,6 +192,12 @@ class NeuroDJ(QObject):
         )
     
     def _sleep_pausable(self, seconds: float):
+        """
+        Pausable sleep that extends deadline when paused.
+        
+        Args:
+            seconds: Duration to sleep
+        """
         end_time = time.time() + seconds
         
         while time.time() < end_time:
@@ -167,12 +208,23 @@ class NeuroDJ(QObject):
             time.sleep(max(0.0, min(0.1, end_time - time.time())))
     
     def _is_viable(self, curr: dict, cand: dict) -> bool:
+        """
+        Check if candidate track is viable for transition.
+        
+        Args:
+            curr: Current track metadata
+            cand: Candidate track metadata
+        
+        Returns:
+            True if viable
+        """
         is_amp = (curr.get('genre') == 'amapiano' or cand.get('genre') == 'amapiano')
         bpm_limit = 4.0 if is_amp else 8.0
         
         if abs(cand.get('bpm', 112.0) - curr.get('bpm', 112.0)) > bpm_limit:
             return False
         
+        # Key compatibility check
         from core.constants import CAMELOT_WHEEL
         ca = CAMELOT_WHEEL.get(curr.get('key', 'C'))
         cb = CAMELOT_WHEEL.get(cand.get('key', 'C'))
@@ -182,6 +234,7 @@ class NeuroDJ(QObject):
             if min(diff, 12 - diff) >= 4:
                 return False
         
+        # Entry point check
         if not cand.get('best_entry_phrases'):
             has_intro = any(s.get('label') in ('intro', 'breakdown')
                           for s in cand.get('structure_map', []))
@@ -194,12 +247,19 @@ class NeuroDJ(QObject):
         return True
     
     def _load_opener(self) -> dict | None:
+        """
+        Load the first track of the set.
+        
+        Returns:
+            Track metadata dict or None if failed
+        """
         while self.crate:
             valid = [t for t in self.crate if t.get('filename') not in self._load_failures]
             if not valid:
                 print("🛑 No loadable tracks in crate.")
                 return None
             
+            # Select lowest BPM track with minimal vocals
             opener = min(valid, key=lambda t: (
                 t.get('bpm', 112.0) +
                 (5 if t.get('stems', {}).get('has_vocals', False) else 0)
@@ -222,6 +282,7 @@ class NeuroDJ(QObject):
                 self.track_a_name = os.path.basename(filename)
                 load_path = os.path.abspath(filename)
                 
+                # Convert to WAV if needed
                 if not filename.lower().endswith('.wav'):
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
@@ -236,14 +297,15 @@ class NeuroDJ(QObject):
                     sf.write(tmp_a, y.T.astype(np.float32), 44100)
                     load_path = tmp_a
                 
+                # ✅ V49.8: Always load opener on Deck A (active_deck is already "A")
                 self.mixer.load_deck("A", load_path)
                 self.mixer.play("A")
                 
                 self._master_bpm_precise = float(ta.get('bpm', 112.0)) or 112.0
                 self.master_bpm = round(self._master_bpm_precise)
                 
-                print(f"\n🎵 NOW PLAYING: {self.track_a_name} "
-                      f"({self._master_bpm_precise:.1f} BPM, {self.track_a_dur:.0f}s)")
+                print(f"\n🎵 NOW PLAYING: {self.track_a_name} on Deck A")
+                print(f"   {self._master_bpm_precise:.1f} BPM, {self.track_a_dur:.0f}s")
                 
                 self.energy_history.append(ta.get('energy', 'High'))
                 return ta
@@ -257,7 +319,10 @@ class NeuroDJ(QObject):
         return None
     
     def start_set(self):
-        
+        """
+        Main set execution loop.
+        Runs until crate is exhausted or error occurs.
+        """
         if not self.crate:
             return
         
@@ -269,18 +334,24 @@ class NeuroDJ(QObject):
         attempted_tracks = set()
         
         while self.crate:
-            
+            # Filter out failed tracks
             self.crate = [t for t in self.crate
                          if t.get('filename') not in self._load_failures]
             if not self.crate:
                 print("🛑 Crate exhausted or all remaining tracks corrupted.")
                 break
             
+            # ✅ V49.8: Get active deck info
+            active_track_name = self.track_a_name if self.active_deck == "A" else self.track_b_name
+            active_track_dur = self.track_a_dur if self.active_deck == "A" else self.track_b_dur
+            
             print(f"\n{'='*60}")
             print(f"🔄 MIX #{self.mix_count + 1} — Starting decision cycle")
             print(f"   Crate size: {len(self.crate)}")
-            print(f"   Track A: {self.track_a_name}")
-            print(f"   Position: {self.mixer.get_position('A'):.1f}s / {self.track_a_dur:.1f}s")
+            print(f"   Active deck: {self.active_deck}")
+            print(f"   Track: {active_track_name}")
+            print(f"   Position: {self.mixer.get_position(self.active_deck):.1f}s / {active_track_dur:.1f}s")
+            print(f"   Next load: Deck {self.next_deck}")
             print(f"{'='*60}")
             
             spb = 60.0 / max(self._master_bpm_precise, 60.0)
@@ -289,6 +360,7 @@ class NeuroDJ(QObject):
             
             print(f"⚙️  DecisionCore evaluating options...")
             
+            # Filter viable candidates
             viable_crate = [t for t in self.crate if self._is_viable(ta, t)]
             if not viable_crate:
                 print("   ⚠️  No viable candidates — using least-bad fallback")
@@ -301,6 +373,7 @@ class NeuroDJ(QObject):
                 if vetoed:
                     print(f"   🔍 Pre-filter: {vetoed} vetoed, {len(viable_crate)} viable")
             
+            # Rank candidates
             current_energy_snapshot = list(self.energy_history) + [ta.get('energy', 'High')]
             
             if self.crate_ranker:
@@ -326,6 +399,7 @@ class NeuroDJ(QObject):
             else:
                 candidate_pool = viable_crate[:3]
             
+            # Remove already attempted tracks
             candidate_pool = [t for t in candidate_pool
                              if t.get('filename') not in attempted_tracks]
             
@@ -340,16 +414,19 @@ class NeuroDJ(QObject):
             
             print(f"   📦 Candidate pool passed to DecisionCore: {len(candidate_pool)} tracks")
             
+            # Get recent transition history
             with self.dataset._lock:
                 trans_history = copy.deepcopy(self.dataset.records[-5:])
             
             print(f"   🧠 Submitting decision to analysis pool...")
+            
+            # Make decision (async)
             decision_future = self._analysis_pool.submit(
                 self.decision_core.decide_next_action,
                 current_track=ta,
                 candidate_tracks=candidate_pool,
-                current_pos_a=self.mixer.get_position("A"),
-                track_a_dur=self.track_a_dur,
+                current_pos_a=self.mixer.get_position(self.active_deck),  # ✅ Use active deck
+                track_a_dur=active_track_dur,  # ✅ Use active track duration
                 master_bpm=self._master_bpm_precise,
                 spb=spb,
                 mix_count=self.mix_count,
@@ -358,6 +435,7 @@ class NeuroDJ(QObject):
                 set_duration_remaining=set_dur_remaining,
             )
             
+            # Wait for decision with pause handling
             decision = None
             wait_start = time.time()
             wait_deadline = wait_start + MAX_WAIT_SECONDS
@@ -396,6 +474,7 @@ class NeuroDJ(QObject):
                     traceback.print_exc()
                     break
             
+            # Log decision stats
             if decision is not None and decision.chosen is not None:
                 n_trans = sum(1 for a in decision.alternatives
                              if a.option.option_type == "transition" and a.draft_plan is not None)
@@ -406,20 +485,22 @@ class NeuroDJ(QObject):
             else:
                 print(f"   💀 Decision returned None or has no chosen option!")
             
+            # Handle hold or force transition if running out of time
             if (decision is None or decision.chosen is None or
                 decision.chosen.option.option_type == "hold"):
                 
-                time_left = self.track_a_dur - self.mixer.get_position("A")
+                time_left = active_track_dur - self.mixer.get_position(self.active_deck)
                 force_threshold = max(60.0, 48.0 * spb + 20.0)
                 
                 if time_left < force_threshold:
-                    print(f"   ⚠️  Only {time_left:.0f}s left. Forcing transition!")
+                    print(f"   ⚠️  Only {time_left:.0f}s left on deck {self.active_deck}. Forcing transition!")
                     
                     if decision and decision.alternatives:
                         n_avail = sum(1 for a in decision.alternatives
                                      if a.option.option_type == "transition" and a.draft_plan)
                         print(f"   🚨 FORCE: {n_avail} transition alternatives available")
                     
+                    # Find best transition option
                     forced_opt = None
                     if decision and decision.alternatives:
                         forced_opt = next(
@@ -436,6 +517,7 @@ class NeuroDJ(QObject):
                             timestamp=decision.timestamp
                         )
                     else:
+                        # Emergency fallback
                         print("   🆘 EMERGENCY: No valid options left. Forcing immediate fallback mix!")
                         emergency_tb = next(
                             (t for t in candidate_pool if t.get('filename') not in attempted_tracks),
@@ -462,6 +544,7 @@ class NeuroDJ(QObject):
                             timestamp=time.time()
                         )
                 else:
+                    # Hold — sleep and continue
                     delay = (decision.chosen.option.delay_beats
                             if (decision and decision.chosen) else 32.0)
                     max_sleep = max(2.0, (time_left - force_threshold) * 0.3)
@@ -470,6 +553,7 @@ class NeuroDJ(QObject):
                     self._sleep_pausable(actual_sleep)
                     continue
             
+            # Log decision
             print("🧠 DECISION LOCKED:")
             print(f"   Goal: {decision.intent.goal}")
             print(f"   Action: {decision.chosen.option.label()}")
@@ -492,17 +576,32 @@ class NeuroDJ(QObject):
                         track_name = os.path.basename(alt.option.track_b.get('filename', '?'))[:30]
                         print(f"      {alt.final_score:.3f} — {track_name} @ {alt.option.delay_beats}b")
             
+            # Execute transition
             tb = decision.chosen.option.track_b
             if tb in self.crate:
                 self.crate.remove(tb)
-            self.track_b_name = os.path.basename(tb.get('filename', '?'))
+            
+            # ✅ V49.8: Update the NEXT deck's name
+            next_track_name = os.path.basename(tb.get('filename', '?'))
+            if self.next_deck == "A":
+                self.track_a_name = next_track_name
+            else:
+                self.track_b_name = next_track_name
             
             print(f"   🔧 Finalizing transition plan...")
+            
+            # Finalize plan
             try:
                 plan = self.planner.finalize_plan(
-                    decision.chosen, ta, spb, self.track_a_dur, self._master_bpm_precise
+                    decision.chosen, ta, spb, active_track_dur, self._master_bpm_precise
                 )
-                self.track_b_dur = plan.track_b_dur
+                
+                # ✅ V49.8: Store duration for the NEXT deck
+                if self.next_deck == "A":
+                    self.track_a_dur = plan.track_b_dur
+                else:
+                    self.track_b_dur = plan.track_b_dur
+                    
             except RunwayExhausted as e:
                 print(f"   ⚠️ Runway exhausted, skipping track: {e}")
                 self._load_failures.add(tb.get('filename'))
@@ -519,21 +618,23 @@ class NeuroDJ(QObject):
             self.current_mix_trigger = plan.mix_trigger
             self.current_technique = TECHNIQUE_LIBRARY[plan.tech_name]['label']
             
+            # Pre-flight EOF validation
             trans_end_time = plan.mix_trigger + plan.trans_dur
             
-            if trans_end_time > self.track_a_dur - 1.0:
-                overshoot = trans_end_time - (self.track_a_dur - 1.0)
+            if trans_end_time > active_track_dur - 1.0:
+                overshoot = trans_end_time - (active_track_dur - 1.0)
                 print(f"\n{'=' * 60}")
                 print(f"🚨 PRE-FLIGHT EOF VALIDATION FAILED")
                 print(f"{'=' * 60}")
-                print(f"Track A EOF:        {self.track_a_dur:.1f}s")
+                print(f"Track EOF:          {active_track_dur:.1f}s")
                 print(f"Mix trigger:        {plan.mix_trigger:.1f}s")
                 print(f"Transition dur:     {plan.trans_dur:.1f}s")
                 print(f"Planned end:        {trans_end_time:.1f}s")
                 print(f"Overshoot:          {overshoot:.1f}s ❌")
                 print(f"{'=' * 60}\n")
                 
-                available_runway = max(0.0, self.track_a_dur - plan.mix_trigger - 1.5)
+                # Emergency shrink
+                available_runway = max(0.0, active_track_dur - plan.mix_trigger - 1.5)
                 
                 if available_runway < 4.0:
                     print(f"   💀 PANIC: Cannot fit minimum 4s transition (have {available_runway:.1f}s). Aborting mix!")
@@ -552,34 +653,42 @@ class NeuroDJ(QObject):
                 
                 print(f"   ✅ Emergency shrink: transition now {safe_trans_dur:.1f}s")
                 print(f"   ✅ Will end at {plan.mix_trigger + safe_trans_dur:.1f}s "
-                      f"(EOF at {self.track_a_dur:.1f}s)\n")
+                      f"(EOF at {active_track_dur:.1f}s)\n")
             
+            # Wait for trigger
             print(f"   ⏳ Waiting for trigger point ({plan.mix_trigger:.1f}s)...")
-            self.executor.wait_for_trigger(plan, self.track_a_dur)
+            self.executor.wait_for_trigger(plan, active_track_dur)
             
-            print(f"   💿 Loading Deck B: {plan.fnb}")
+            # ✅ V49.8: Load on the NEXT deck
+            print(f"   💿 Loading Deck {self.next_deck}: {plan.fnb}")
             try:
-                self.mixer.load_deck("B", plan.fnb)
-                print(f"   ✅ Deck B loaded successfully")
+                self.mixer.load_deck(self.next_deck, plan.fnb)
+                print(f"   ✅ Deck {self.next_deck} loaded successfully")
             except Exception as e:
-                print(f"💀 Failed to load Deck B ({plan.fnb}): {e}")
+                print(f"💀 Failed to load Deck {self.next_deck} ({plan.fnb}): {e}")
                 import traceback
                 traceback.print_exc()
                 self.current_mix_trigger = 0.0
                 self.current_technique = "—"
-                self.track_b_name = "—"
+                
+                if self.next_deck == "A":
+                    self.track_a_name = "—"
+                else:
+                    self.track_b_name = "—"
+                
                 self._load_failures.add(tb.get('filename'))
                 attempted_tracks.add(tb.get('filename'))
                 self.crate.append(tb)
                 continue
             
-            pos_after_warp = self.mixer.get_position("A")
-            if pos_after_warp >= plan.mix_trigger - 1.0:
-                gap = pos_after_warp - plan.mix_trigger
+            # CPU lag compensation
+            pos_after_load = self.mixer.get_position(self.active_deck)
+            if pos_after_load >= plan.mix_trigger - 1.0:
+                gap = pos_after_load - plan.mix_trigger
                 print(f"   ⚠️ CPU Lag detected: missed planned trigger by {gap:.1f}s")
                 
-                plan.mix_trigger = pos_after_warp + 2.0
-                remaining = self.track_a_dur - plan.mix_trigger - EXECUTION_RESERVE_SEC
+                plan.mix_trigger = pos_after_load + 2.0
+                remaining = active_track_dur - plan.mix_trigger - EXECUTION_RESERVE_SEC
                 
                 if remaining < 16.0 * spb:
                     print(f"   ⚠️ Track nearly over — falling back to safe Echo Out")
@@ -595,22 +704,26 @@ class NeuroDJ(QObject):
                 else:
                     print(f"   🔄 Shifting trigger to {plan.mix_trigger:.1f}s")
                 
-                absolute_max_trans_dur = self.track_a_dur - plan.mix_trigger - 1.0
+                # Final EOF check
+                absolute_max_trans_dur = active_track_dur - plan.mix_trigger - 1.0
                 if plan.trans_dur > absolute_max_trans_dur:
                     print(f"   🚨 EOF BOUNDARY VIOLATION: Clamping to {absolute_max_trans_dur:.1f}s")
                     plan.update_duration(max(2.0, absolute_max_trans_dur), spb)
             
+            # Record selection
             if self.crate_ranker:
                 self.crate_ranker.record_selection(tb)
             
-            self.mixer.seek("B", plan.b_start_w)
+            # ✅ V49.8: Seek on the NEXT deck
+            self.mixer.seek(self.next_deck, plan.b_start_w)
             
+            # Precise trigger wait
             print(f"   🎯 Final precision wait to trigger point...")
             stall_start = None
-            last_pos = self.mixer.get_position("A")
+            last_pos = self.mixer.get_position(self.active_deck)
             
             while True:
-                pos = self.mixer.get_position("A")
+                pos = self.mixer.get_position(self.active_deck)
                 tl = plan.mix_trigger - pos
                 if tl <= 0:
                     break
@@ -618,7 +731,7 @@ class NeuroDJ(QObject):
                 if self.is_paused:
                     time.sleep(0.1)
                     stall_start = None
-                    last_pos = self.mixer.get_position("A")
+                    last_pos = self.mixer.get_position(self.active_deck)
                     continue
                 
                 if pos <= last_pos:
@@ -640,10 +753,12 @@ class NeuroDJ(QObject):
                     while time.perf_counter() < deadline:
                         pass
             
+            # Generate transition ID
             tx_id = f"tx_{int(time.time())}_{self.mix_count}"
             with self._tx_lock:
                 self._pending_tx_id = tx_id
             
+            # Prepare transition record
             pending_record = {
                 "tx_id": tx_id,
                 "ta": ta, "tb": tb,
@@ -654,20 +769,22 @@ class NeuroDJ(QObject):
                 "assumptions": plan.assumptions,
             }
             
+            # Schedule EQ events
             self.executor.schedule_eq_events(ta, tb, plan, spb)
             
+            # Create telemetry
             current_telemetry = None
             if TELEMETRY_AVAILABLE:
                 current_telemetry = TransitionTelemetry(
                     tx_id, plan.to_dict(), ta.get('filename', '?'), tb.get('filename', '?')
                 )
             
-            print(f"   🎬 TRIGGERING TRANSITION NOW")
+            print(f"   🎬 TRIGGERING TRANSITION: {self.active_deck} → {self.next_deck}")
             print(f"      Technique: {plan.tech_name}")
             print(f"      Duration: {plan.trans_dur:.1f}s")
             print(f"      Beats: {plan.recipe['beats']:.0f}")
             
-            # ✅ CRITICAL FIX: Call the method with parentheses!
+            # Execute transition
             try:
                 handoff_forced = self.executor.trigger_transition(plan, current_telemetry)
                 print(f"   ✅ Transition execution complete (forced={handoff_forced})")
@@ -675,17 +792,9 @@ class NeuroDJ(QObject):
                 print(f"💀 Transition execution crashed: {e}")
                 import traceback
                 traceback.print_exc()
-                
-                # ✅ Enhanced diagnostics
-                print(f"\n🔍 MIXER DIAGNOSTICS:")
-                print(f"   Heartbeat: {self.mixer.get_callback_heartbeat()}")
-                print(f"   Lock failures: {self.mixer.get_lock_failure_count()}")
-                print(f"   Is transitioning: {self.mixer.is_transitioning()}")
-                print(f"   Volume A: {self.mixer.get_volume('A'):.3f}")
-                print(f"   Volume B: {self.mixer.get_volume('B'):.3f}")
-                
                 handoff_forced = False
             
+            # Log to dataset (async)
             self._learn_pool.submit(
                 self.dataset.log_transition_async,
                 pending_record["tx_id"],
@@ -698,23 +807,41 @@ class NeuroDJ(QObject):
                 pending_record["assumptions"]
             )
             
+            # Post-transition sleep
             self.executor.post_transition_sleep(plan.tech_name)
             time.sleep(0.2)
             
+            # Clear acapella mode on BOTH decks
             try:
                 self.mixer.set_acapella_mode("A", 0.0)
                 self.mixer.set_acapella_mode("B", 0.0)
             except Exception:
                 pass
             
-            print(f"   🔀 Swapping decks...")
-            self.mixer.swap_decks()
+            # ✅ V49.8: NO SWAP - Just ping-pong the deck tracking
+            print(f"   🔄 Transition complete: {self.active_deck} → {self.next_deck}")
             
+            # Swap which deck is active
+            old_active = self.active_deck
+            self.active_deck = self.next_deck
+            self.next_deck = old_active
+            
+            print(f"   ✅ Active deck is now: {self.active_deck}")
+            print(f"   📦 Next track will load on: {self.next_deck}")
+            
+            # ✅ V49.8: Ensure volumes are correct (safety check)
             try:
-                self.mixer.set_acapella_mode("A", 0.0)
-            except Exception:
-                pass
+                if self.active_deck == "A":
+                    self.mixer.set_volume("A", 1.0)
+                    self.mixer.set_volume("B", 0.0)
+                else:
+                    self.mixer.set_volume("B", 1.0)
+                    self.mixer.set_volume("A", 0.0)
+                print(f"   ✅ Volumes confirmed: {self.active_deck}=1.0")
+            except Exception as e:
+                print(f"   ⚠️ Volume confirmation failed: {e}")
             
+            # Update master BPM
             new_bpm = float(tb.get('bpm', self._master_bpm_precise))
             if new_bpm > 0:
                 if abs(new_bpm - self._master_bpm_precise) < 1.0:
@@ -730,25 +857,26 @@ class NeuroDJ(QObject):
                 
                 self.master_bpm = round(self._master_bpm_precise)
             
+            # Update state for NEXT iteration
             tb_energy = tb.get('energy', 'High')
-            self.track_a_dur = plan.track_b_dur
-            self.track_a_name = self.track_b_name
-            self.track_b_name = "—"
             self.current_mix_trigger = 0.0
             self.current_technique = "—"
             self.mix_count += 1
             attempted_tracks.clear()
             
+            # Update energy history
             self.energy_history.append(tb_energy)
             if len(self.energy_history) > 100:
                 self.energy_history = self.energy_history[-100:]
             
+            # Update set state
             if self.set_state:
                 def _update_with_lock():
                     with self._set_state_lock:
                         self.set_state.update_transition(ta, tb, plan.tech_name)
                 self._learn_pool.submit(_update_with_lock)
             
+            # Request rating
             print(f"   📊 Scheduling rating panel (800ms delay)...")
             
             _mem_key = plan.mem_key
@@ -759,17 +887,22 @@ class NeuroDJ(QObject):
                 _mem_key, _recipe, _telemetry
             ))
             
+            # Cleanup
             ta = tb
             self.warper.cleanup_temp_files(keep_last=True)
             gc.collect()
             
             print(f"✅ Mix #{self.mix_count} complete\n")
         
-        print(f"\n🏁 Setlist complete. '{self.track_a_name}' playing out.")
+        active_name = self.track_a_name if self.active_deck == "A" else self.track_b_name
+        print(f"\n🏁 Setlist complete. '{active_name}' playing out on Deck {self.active_deck}.")
         self.brain.ml.save_brain()
         self.warper.cleanup_temp_files(keep_last=False)
 
 
+# ════════════════════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ════════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python main.py master_library.json [set_duration_seconds]")
