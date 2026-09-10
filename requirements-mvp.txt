@@ -1,0 +1,4 @@
+# Safe MVP runtime. The existing experimental GUI has additional dependencies.
+numpy>=1.23
+soundfile>=0.12
+sounddevice>=0.4

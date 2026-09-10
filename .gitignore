@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.mvp_cache/
+
+# Runtime files produced by the experimental engine
+neuro_brain_memory.json
+neuro_confidence.json
+transition_log.json
+neuro_brain_memory.json.tmp
+neuro_confidence.json.tmp
+transition_log.json.tmp
+temp_deck_*.wav
+temp_sync_deck_b_*.wav
+
+# Offline prep outputs
+*_ready.wav
+master_library.json
+master_library.json.tmp
