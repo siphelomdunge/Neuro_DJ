@@ -64,7 +64,7 @@ Neuro-DJ operates on a dual-layer architecture:
 The repository now includes a deliberately small playback path in `mvp_dj.py`. It is designed for reliability rather than experimental technique selection:
 
 - no phrase/HPSS analysis in the live path;
-- same explicit genre first, then BPM/key/energy scoring with artist variety;
+- automatic same-genre/BPM/key/energy scoring with artist variety, or exact manual playlist order;
 - 44.1 kHz stereo conversion and conservative loudness normalization;
 - one deterministic equal-power crossfade;
 - background preparation of the next local or explicitly supplied direct URL track;

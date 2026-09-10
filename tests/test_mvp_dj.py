@@ -33,6 +33,17 @@ class SelectorTests(unittest.TestCase):
         selector.claim(current)
         self.assertEqual(selector.choose(current).track_id, "c")
 
+    def test_manual_order_ignores_compatibility_scores(self):
+        first = Track("a", "a.wav", "A", genre="house", bpm=124)
+        planned_next = Track("b", "b.wav", "Planned Next", genre="techno", bpm=140)
+        compatible_but_later = Track("c", "c.wav", "Compatible Later", genre="house", bpm=124)
+        selector = TrackSelector(
+            [first, planned_next, compatible_but_later],
+            manual_order=True,
+        )
+        selector.claim(first)
+        self.assertEqual(selector.choose(first).track_id, "b")
+
     def test_camelot_adjacent_keys_score_above_clash(self):
         self.assertGreater(_key_score("8A", "9A"), _key_score("8A", "1B"))
 

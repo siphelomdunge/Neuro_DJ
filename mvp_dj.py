@@ -240,9 +240,16 @@ def load_playlist(path: PathLike) -> list[Track]:
 class TrackSelector:
     """Deterministic, explainable next-track selection."""
 
-    def __init__(self, tracks: Iterable[Track], *, strict_genre: bool = True):
+    def __init__(
+        self,
+        tracks: Iterable[Track],
+        *,
+        strict_genre: bool = True,
+        manual_order: bool = False,
+    ):
         self.tracks = list(tracks)
         self.strict_genre = strict_genre
+        self.manual_order = manual_order
         self._claimed: set[str] = set()
         self._recent_artists: list[str] = []
         self._recent_energies: list[float] = []
@@ -278,6 +285,12 @@ class TrackSelector:
         candidates = [t for t in self.tracks if t.track_id not in self._claimed]
         if not candidates:
             return None
+
+        # Manual mode is intentionally absolute: playlist order wins over
+        # genre/BPM/key scoring. This is useful when the operator has planned
+        # the party arc and only wants Neuro-DJ to perform the transitions.
+        if self.manual_order:
+            return candidates[0]
 
         same_genre = [t for t in candidates if current and _same_genre(current, t)]
         fallback = bool(current and current.genre != "open" and not same_genre)
@@ -802,12 +815,17 @@ class MVPDJ:
         repeat: bool = False,
         playlist_path: Optional[PathLike] = None,
         max_tracks: Optional[int] = None,
+        manual_order: bool = False,
     ):
         if not tracks:
             raise MVPError("No tracks supplied")
         self.tracks = tracks
         self.cache = AudioCache(cache_dir)
-        self.selector = TrackSelector(tracks, strict_genre=strict_genre)
+        self.selector = TrackSelector(
+            tracks,
+            strict_genre=strict_genre,
+            manual_order=manual_order,
+        )
         self.transition_beats = max(8, int(transition_beats))
         self.repeat = repeat
         self.playlist_path = Path(playlist_path).expanduser().resolve() if playlist_path else None
@@ -1001,8 +1019,18 @@ class MVPDJ:
         return chosen, future
 
 
-def dry_run(tracks: list[Track], *, strict_genre: bool = True, limit: Optional[int] = None) -> None:
-    selector = TrackSelector(tracks, strict_genre=strict_genre)
+def dry_run(
+    tracks: list[Track],
+    *,
+    strict_genre: bool = True,
+    manual_order: bool = False,
+    limit: Optional[int] = None,
+) -> None:
+    selector = TrackSelector(
+        tracks,
+        strict_genre=strict_genre,
+        manual_order=manual_order,
+    )
     current = selector.choose(None)
     count = 0
     while current is not None and (limit is None or count < limit):
@@ -1021,6 +1049,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache-dir", default=".mvp_cache", help="Cache directory for online tracks")
     parser.add_argument("--transition-beats", type=int, default=DEFAULT_TRANSITION_BEATS)
     parser.add_argument("--allow-cross-genre", action="store_true", help="Use another genre only if needed")
+    parser.add_argument("--manual-order", action="store_true", help="Play playlist/folder order exactly; do not select by compatibility")
     parser.add_argument("--repeat", action="store_true", help="Reuse tracks when the crate is exhausted")
     parser.add_argument("--watch-playlist", action="store_true", help="Import tracks appended to --playlist while running")
     parser.add_argument("--dry-run", action="store_true", help="Print the planned order without audio playback")
@@ -1043,7 +1072,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         tracks = load_tracks(args)
         print(f"Loaded {len(tracks)} track(s).")
         if args.dry_run:
-            dry_run(tracks, strict_genre=not args.allow_cross_genre, limit=args.max_tracks)
+            dry_run(
+                tracks,
+                strict_genre=not args.allow_cross_genre,
+                manual_order=args.manual_order,
+                limit=args.max_tracks,
+            )
             return 0
 
         dj = MVPDJ(
@@ -1054,6 +1088,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             repeat=args.repeat,
             playlist_path=args.playlist if args.watch_playlist else None,
             max_tracks=args.max_tracks,
+            manual_order=args.manual_order,
         )
         signal.signal(signal.SIGINT, lambda *_: dj.stop())
         dj.run()

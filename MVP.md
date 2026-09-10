@@ -12,8 +12,9 @@ The MVP uses:
 
 - explicit genre metadata from the playlist or the first music-folder subdirectory;
 - optional BPM, Camelot key, energy, and cue-in metadata;
-- same-genre selection first, then a clearly marked fallback when the genre is exhausted;
+- automatic mode: same-genre selection first, then a clearly marked fallback when the genre is exhausted;
 - an artist-variety guard to avoid the same artist back-to-back when an equally safe alternative exists;
+- manual mode: play the playlist order exactly and use Neuro-DJ only for the transitions;
 - a single deterministic 32-beat crossfade with compiled three-band EQ and an explicit low-end swap;
 - 44.1 kHz stereo output;
 - an on-disk cache for explicitly supplied direct URLs;
@@ -105,7 +106,7 @@ python mvp_dj.py --playlist party.json --dry-run
 python mvp_dj.py --folder ./music --dry-run
 ```
 
-The selector prefers, in order:
+Automatic mode prefers, in order:
 
 1. tracks that have not been used;
 2. the same explicit genre;
@@ -114,7 +115,19 @@ The selector prefers, in order:
 5. a different artist when an equally safe option exists;
 6. a small energy change rather than a sudden jump.
 
-Unknown genre is not treated as compatible with every genre. If no same-genre track remains, the next least-bad candidate is used only as a fallback.
+If you want to decide the exact running order yourself, use `--manual-order`. In that mode the JSON list order is absolute; genre, BPM, key, energy and artist scoring do not reorder anything. The audio engine still performs the safe transition and BPM adjustment.
+
+```bash
+python mvp_dj.py \
+  --playlist party.json \
+  --manual-order \
+  --watch-playlist \
+  --transition-beats 32
+```
+
+When using `--watch-playlist`, append new tracks to the end of the JSON `tracks` list. They will be played in the order they are added.
+
+Unknown genre is not treated as compatible with every genre in automatic mode. If no same-genre track remains, the next least-bad candidate is used only as a fallback.
 
 ## Run the MVP
 
