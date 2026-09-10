@@ -620,6 +620,7 @@ class MVPDJ:
         strict_genre: bool = True,
         repeat: bool = False,
         playlist_path: Optional[PathLike] = None,
+        max_tracks: Optional[int] = None,
     ):
         if not tracks:
             raise MVPError("No tracks supplied")
@@ -629,6 +630,7 @@ class MVPDJ:
         self.transition_beats = max(8, int(transition_beats))
         self.repeat = repeat
         self.playlist_path = Path(playlist_path).expanduser().resolve() if playlist_path else None
+        self.max_tracks = max_tracks if max_tracks is None or max_tracks > 0 else None
         self._playlist_mtime = self.playlist_path.stat().st_mtime_ns if self.playlist_path and self.playlist_path.exists() else None
         self._playlist_error_mtime: Optional[int] = None
         self._stop = threading.Event()
@@ -686,6 +688,7 @@ class MVPDJ:
         target_bpm = current.bpm or DEFAULT_BPM
         transition_frames = int(self.transition_beats * 60.0 / target_bpm * SAMPLE_RATE)
         renderer = MixRenderer(first_audio, transition_frames=transition_frames)
+        tracks_played = 1
 
         installed_track: Optional[Track] = None
         candidate_track: Optional[Track] = None
@@ -695,10 +698,17 @@ class MVPDJ:
         try:
             # Prepare the first transition before opening the stream. After that,
             # all network/decode work runs in the background while audio continues.
-            installed_track, installed_audio = self._prepare_next(current)
+            if self.max_tracks is None or tracks_played < self.max_tracks:
+                installed_track, installed_audio = self._prepare_next(current)
+            else:
+                installed_track, installed_audio = None, None
             if installed_track and installed_audio is not None:
                 renderer.set_next(installed_audio)
-                candidate_track, candidate_future = self._schedule_followup(installed_track, executor)
+                # `installed_track` is already the second planned track. Only
+                # prepare another follow-up when the requested test limit allows
+                # at least one more track beyond it.
+                if self.max_tracks is None or tracks_played + 2 <= self.max_tracks:
+                    candidate_track, candidate_future = self._schedule_followup(installed_track, executor)
 
             with sd.OutputStream(
                 samplerate=SAMPLE_RATE,
@@ -716,8 +726,11 @@ class MVPDJ:
                     if renderer.consume_changed():
                         if installed_track is not None:
                             current = installed_track
+                            tracks_played += 1
                             print(f"▶ {current.title} [{current.genre}] {current.bpm or '?'} BPM")
                         installed_track = None
+                        if self.max_tracks is not None and tracks_played >= self.max_tracks:
+                            renderer.set_hold_enabled(False)
 
                     if installed_track is None and candidate_future is not None and candidate_future.done():
                         try:
@@ -726,9 +739,10 @@ class MVPDJ:
                                 installed_track = prepared_track
                                 candidate_track = None
                                 candidate_future = None
-                                candidate_track, candidate_future = self._schedule_followup(
-                                    installed_track, executor
-                                )
+                                if self.max_tracks is None or tracks_played + 2 <= self.max_tracks:
+                                    candidate_track, candidate_future = self._schedule_followup(
+                                        installed_track, executor
+                                    )
                         except Exception as exc:
                             if candidate_track is not None:
                                 print(f"⚠️ Skipping {candidate_track.title}: {exc}")
@@ -739,10 +753,13 @@ class MVPDJ:
                     # If a download fails or there are no same-genre tracks left,
                     # schedule the best remaining fallback. The selector never
                     # blocks the audio callback.
-                    if installed_track is None and candidate_future is None:
+                    can_schedule_next = self.max_tracks is None or tracks_played + 1 <= self.max_tracks
+                    if installed_track is None and candidate_future is None and can_schedule_next:
                         candidate_track, candidate_future = self._schedule_fallback(current, executor)
                         if candidate_track is None:
                             renderer.set_hold_enabled(False)
+                    elif installed_track is None and candidate_future is None and not can_schedule_next:
+                        renderer.set_hold_enabled(False)
 
                     time.sleep(0.05)
         finally:
@@ -821,7 +838,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repeat", action="store_true", help="Reuse tracks when the crate is exhausted")
     parser.add_argument("--watch-playlist", action="store_true", help="Import tracks appended to --playlist while running")
     parser.add_argument("--dry-run", action="store_true", help="Print the planned order without audio playback")
-    parser.add_argument("--max-tracks", type=int, default=None, help="Limit dry-run output")
+    parser.add_argument("--max-tracks", type=int, default=None, help="Stop live playback after this many tracks; also limits dry-run output")
     return parser
 
 
@@ -850,6 +867,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             strict_genre=not args.allow_cross_genre,
             repeat=args.repeat,
             playlist_path=args.playlist if args.watch_playlist else None,
+            max_tracks=args.max_tracks,
         )
         signal.signal(signal.SIGINT, lambda *_: dj.stop())
         dj.run()
