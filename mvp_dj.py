@@ -681,6 +681,7 @@ class MixRenderer:
         self._changed = threading.Event()
         self._ended = threading.Event()
         self._stopped = threading.Event()
+        self._paused = False
         self.callback_errors: list[str] = []
 
     @staticmethod
@@ -783,6 +784,16 @@ class MixRenderer:
     def stop(self) -> None:
         self._stopped.set()
 
+    def toggle_pause(self) -> bool:
+        """Pause/resume without advancing the audio position."""
+        with self._lock:
+            self._paused = not self._paused
+            return self._paused
+
+    def is_paused(self) -> bool:
+        with self._lock:
+            return self._paused
+
     @staticmethod
     def _safe_mix(a: np.ndarray, b: np.ndarray, a_gain: float, b_gain: float) -> np.ndarray:
         mixed = a * a_gain + b * b_gain
@@ -793,6 +804,8 @@ class MixRenderer:
         try:
             outdata.fill(0)
             with self._lock:
+                if self._paused:
+                    return
                 output_pos = 0
                 while output_pos < frames:
                     if self._stopped.is_set():
@@ -918,6 +931,24 @@ class MVPDJ:
                 print(f"⚠️ Live playlist refresh postponed: {exc}")
                 self._playlist_error_mtime = mtime
 
+    def _console_control_loop(self, renderer: MixRenderer) -> None:
+        """Read simple terminal controls without touching the audio callback."""
+        if not sys.stdin.isatty():
+            return
+        print("Controls: type p + Enter to pause/resume; q + Enter to stop.")
+        while not self._stop.is_set():
+            try:
+                command = input().strip().lower()
+            except (EOFError, OSError):
+                return
+            if command in {"p", "pause", "resume"}:
+                paused = renderer.toggle_pause()
+                print("⏸ Paused" if paused else "▶ Resumed")
+            elif command in {"q", "quit", "exit", "stop"}:
+                self.stop()
+                renderer.stop()
+                return
+
     def run(self) -> None:
         _require_audio_dependencies()
         try:
@@ -981,6 +1012,11 @@ class MVPDJ:
                 callback=renderer,
             ):
                 print("🎧 Safe MVP is playing. Ctrl+C stops playback.")
+                threading.Thread(
+                    target=self._console_control_loop,
+                    args=(renderer,),
+                    daemon=True,
+                ).start()
                 while not self._stop.is_set() and not renderer.is_ended():
                     self._refresh_playlist()
                     if renderer.callback_errors:

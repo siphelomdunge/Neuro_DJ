@@ -177,7 +177,15 @@ A 32-beat transition is a conservative starting point. At 120 BPM it is approxim
 - beats 17–24: B low rises gently while A low is reduced;
 - beats 25–32: A fades, then B low completes the swap on beat 32.
 
-The MVP does not create a separate headphone cue mix. It assumes the supplied `cue_in` or first sample is the intended phrase entry. Use an explicit `cue_in` in the playlist when a file has leading silence. Use 64 beats only after listening to the result on the actual party sound system.
+The MVP does not create a separate headphone cue mix. It assumes the supplied `cue_in` or first sample is the intended phrase entry. Use an explicit `cue_in` in the playlist when a file has leading silence.
+
+While playing in a terminal:
+
+- type `p` and press Enter to pause/resume;
+- type `q` and press Enter to stop;
+- `Ctrl+C` also stops playback.
+
+Pause freezes the audio position and transition state; it does not reset the current mix. Use 64 beats only after listening to the result on the actual party sound system.
 
 ## Party checklist
 
