@@ -13,7 +13,7 @@ The MVP uses:
 - explicit genre metadata from the playlist or the first music-folder subdirectory;
 - optional BPM, Camelot key, energy, and cue-in metadata;
 - same-genre selection first, then a clearly marked fallback when the genre is exhausted;
-- a single deterministic equal-power crossfade;
+- a single deterministic 32-beat crossfade with compiled three-band EQ and an explicit low-end swap;
 - 44.1 kHz stereo output;
 - an on-disk cache for explicitly supplied direct URLs;
 - a local/cache fallback instead of allowing a network failure to enter the audio callback;
@@ -139,7 +139,14 @@ python mvp_dj.py --playlist party.json --watch-playlist --transition-beats 32
 
 The file is polled safely; a partially-written JSON file is retried without interrupting audio. Newly added tracks are only cached when they become the next candidate.
 
-A 32-beat transition is a conservative starting point. At 120 BPM it is approximately 16 seconds. Use 64 beats only after listening to the result on the actual party sound system.
+A 32-beat transition is a conservative starting point. At 120 BPM it is approximately 16 seconds. The MVP's audible transition profile is:
+
+- beats 1–8: B fader rises to 70%, B low is fully cut, and B highs stay restrained;
+- beats 9–16: B reaches unity, B mids/highs open, and A highs soften;
+- beats 17–24: B low rises gently while A low is reduced;
+- beats 25–32: A fades, then B low completes the swap on beat 32.
+
+The MVP does not create a separate headphone cue mix. It assumes the supplied `cue_in` or first sample is the intended phrase entry. Use an explicit `cue_in` in the playlist when a file has leading silence. Use 64 beats only after listening to the result on the actual party sound system.
 
 ## Party checklist
 

@@ -57,6 +57,11 @@ try:  # Optional at import time; only required for actual playback.
 except ImportError:  # pragma: no cover - exercised on minimal installations
     sf = None
 
+try:  # Compiled DSP helper used by the transition EQ; dry-run does not need it.
+    from scipy.signal import lfilter
+except ImportError:  # pragma: no cover - exercised on minimal installations
+    lfilter = None
+
 
 SAMPLE_RATE = 44_100
 CHANNELS = 2
@@ -451,6 +456,8 @@ def _require_audio_dependencies() -> None:
         missing.append("numpy")
     if sf is None:
         missing.append("soundfile")
+    if lfilter is None:
+        missing.append("scipy")
     if missing:
         raise AudioDependencyError(
             "Live playback needs " + ", ".join(missing) + ". Install requirements-mvp.txt."
@@ -501,17 +508,64 @@ def _normalise(data: np.ndarray, target_rms: float = 0.125) -> np.ndarray:
     return np.clip(data, -1.0, 1.0)
 
 
-class MixRenderer:
-    """Small two-buffer equal-power renderer suitable for a conservative MVP."""
+class DeckEQ:
+    """Lightweight three-band EQ with state retained across audio blocks."""
 
-    def __init__(self, first: np.ndarray, *, transition_frames: int, sample_rate: int = SAMPLE_RATE):
+    def __init__(self, sample_rate: int = SAMPLE_RATE):
+        # Two first-order low-pass filters give low, mid and high bands without
+        # doing heavy spectral analysis in the audio callback.
+        low_cut = 180.0
+        high_cut = 4000.0
+        self._low_alpha = 1.0 - math.exp(-2.0 * math.pi * low_cut / sample_rate)
+        self._high_alpha = 1.0 - math.exp(-2.0 * math.pi * high_cut / sample_rate)
+        self._low_zi = np.zeros((1, CHANNELS), dtype=np.float32)
+        self._high_zi = np.zeros((1, CHANNELS), dtype=np.float32)
+
+    def process(self, samples: np.ndarray, gains: tuple[float, float, float]) -> np.ndarray:
+        if len(samples) == 0:
+            return samples
+        # scipy.signal.lfilter is compiled code, so the callback processes a
+        # complete block instead of running a Python filter loop per sample.
+        low_b = np.array([self._low_alpha], dtype=np.float32)
+        low_a = np.array([1.0, -(1.0 - self._low_alpha)], dtype=np.float32)
+        high_b = np.array([self._high_alpha], dtype=np.float32)
+        high_a = np.array([1.0, -(1.0 - self._high_alpha)], dtype=np.float32)
+        low, self._low_zi = lfilter(low_b, low_a, samples, axis=0, zi=self._low_zi)
+        high_lpf, self._high_zi = lfilter(
+            high_b, high_a, samples, axis=0, zi=self._high_zi
+        )
+        high = samples - high_lpf
+        mid = high_lpf - low
+        low_gain, mid_gain, high_gain = gains
+        return (
+            low * low_gain + mid * mid_gain + high * high_gain
+        ).astype(np.float32, copy=False)
+
+
+class MixRenderer:
+    """Two-buffer renderer with the conservative 32-beat bass-swap profile."""
+
+    def __init__(
+        self,
+        first: np.ndarray,
+        *,
+        transition_frames: int,
+        transition_beats: int = DEFAULT_TRANSITION_BEATS,
+        bpm: float = DEFAULT_BPM,
+        sample_rate: int = SAMPLE_RATE,
+    ):
         self.sample_rate = sample_rate
         self.transition_frames = max(1, int(transition_frames))
+        self.transition_beats = max(8, int(transition_beats))
+        self.bpm = max(1.0, float(bpm))
+        self._frames_per_beat = self.sample_rate * 60.0 / self.bpm
         self._lock = threading.Lock()
         self._current = first
         self._current_pos = 0
+        self._current_eq = DeckEQ(sample_rate)
         self._next: Optional[np.ndarray] = None
         self._next_pos = 0
+        self._next_eq: Optional[DeckEQ] = None
         self._transition_start = max(0, len(first) - self.transition_frames)
         self._transition_length = max(1, len(first) - self._transition_start)
         self._hold_enabled = True
@@ -520,6 +574,57 @@ class MixRenderer:
         self._ended = threading.Event()
         self._stopped = threading.Event()
         self.callback_errors: list[str] = []
+
+    @staticmethod
+    def _smoothstep(value: float) -> float:
+        value = min(1.0, max(0.0, value))
+        return value * value * (3.0 - 2.0 * value)
+
+    def _profile(self, progress: float) -> tuple[float, ...]:
+        """Return A/B EQ and fader gains for the requested transition phase.
+
+        The profile follows the requested 32-beat plan:
+          1-8: B enters with bass cut and restrained highs;
+          9-16: B reaches full mids/highs while A highs soften;
+          17-24: B teases in low end and A makes room;
+          25-32: A fades and the low-end swap completes on beat 32.
+        """
+        beat = min(float(self.transition_beats), max(0.0, progress * self.transition_beats))
+        a_low = a_mid = a_high = 1.0
+        b_low = 0.0
+        b_mid = 0.25
+        b_high = 0.35  # restrained high EQ during the intro
+        a_fader = 1.0
+        b_fader = 0.0
+
+        if beat <= 8.0:
+            b_fader = 0.70 * self._smoothstep(beat / 8.0)
+        elif beat <= 16.0:
+            b_fader = 0.70 + 0.30 * self._smoothstep((beat - 8.0) / 8.0)
+            b_mid = 0.25 + 0.75 * self._smoothstep((beat - 8.0) / 8.0)
+            b_high = 0.35 + 0.65 * self._smoothstep((beat - 8.0) / 8.0)
+            a_high = 1.0 - 0.25 * self._smoothstep((beat - 8.0) / 8.0)
+        elif beat <= 24.0:
+            b_fader = 1.0
+            b_mid = b_high = 1.0
+            b_low = 0.35 * self._smoothstep((beat - 16.0) / 8.0)
+            a_low = 1.0 - 0.45 * self._smoothstep((beat - 16.0) / 8.0)
+            a_high = 0.75
+        else:
+            b_fader = 1.0
+            b_mid = b_high = 1.0
+            b_low = 0.35
+            a_low = 0.55
+            a_high = 0.75
+            fade = self._smoothstep((beat - 24.0) / 8.0)
+            a_fader = 1.0 - fade
+            # The final beat is the deliberate low-end handoff.
+            if beat >= 31.0:
+                swap = self._smoothstep(beat - 31.0)
+                b_low = 0.35 + 0.65 * swap
+                a_low = 0.55 * (1.0 - swap)
+
+        return a_low, a_mid, a_high, b_low, b_mid, b_high, a_fader, b_fader
 
     def set_next(self, audio: np.ndarray) -> bool:
         """Install a prepared track. Returns False if another track is queued."""
@@ -530,6 +635,7 @@ class MixRenderer:
                 return False
             self._next = audio
             self._next_pos = 0
+            self._next_eq = DeckEQ(self.sample_rate)
             remaining = max(1, len(self._current) - self._current_pos)
             self._transition_length = min(self.transition_frames, remaining)
             self._transition_start = len(self._current) - self._transition_length
@@ -569,19 +675,28 @@ class MixRenderer:
     def stop(self) -> None:
         self._stopped.set()
 
+    @staticmethod
+    def _safe_mix(a: np.ndarray, b: np.ndarray, a_gain: float, b_gain: float) -> np.ndarray:
+        mixed = a * a_gain + b * b_gain
+        # Leave headroom for two full-range tracks without hard clipping.
+        return (np.tanh(mixed * 0.90) / 0.90).astype(np.float32, copy=False)
+
     def __call__(self, outdata, frames, time_info, status) -> None:  # sounddevice callback API
         try:
             outdata.fill(0)
             with self._lock:
-                for frame in range(frames):
+                output_pos = 0
+                while output_pos < frames:
                     if self._stopped.is_set():
                         break
                     if self._current_pos >= len(self._current):
                         if self._next is not None:
                             self._current = self._next
                             self._current_pos = self._next_pos
+                            self._current_eq = self._next_eq or DeckEQ(self.sample_rate)
                             self._next = None
                             self._next_pos = 0
+                            self._next_eq = None
                             self._transition_start = max(0, len(self._current) - self.transition_frames)
                             self._transition_length = min(self.transition_frames, len(self._current))
                             self._changed.set()
@@ -591,21 +706,51 @@ class MixRenderer:
                             self._ended.set()
                             break
 
-                    a = self._current[self._current_pos]
-                    if self._next is not None and self._current_pos >= self._transition_start:
-                        b = self._next[self._next_pos] if self._next_pos < len(self._next) else 0.0
-                        progress = min(
-                            1.0,
-                            max(0.0, (self._current_pos - self._transition_start) / self._transition_length),
+                    remaining = min(frames - output_pos, len(self._current) - self._current_pos)
+                    if remaining <= 0:
+                        continue
+
+                    # Before the transition, only render A. This also advances
+                    # A's EQ state so the handoff has no filter discontinuity.
+                    if self._next is None or self._current_pos < self._transition_start:
+                        pre = remaining
+                        if self._next is not None:
+                            pre = min(pre, self._transition_start - self._current_pos)
+                        a_block = self._current[self._current_pos:self._current_pos + pre]
+                        outdata[output_pos:output_pos + pre] = self._current_eq.process(
+                            a_block, (1.0, 1.0, 1.0)
                         )
-                        gain_a = math.cos(progress * math.pi / 2.0)
-                        gain_b = math.sin(progress * math.pi / 2.0)
-                        outdata[frame] = a * gain_a + b * gain_b
-                        self._next_pos += 1
-                    else:
-                        outdata[frame] = a
-                    self._current_pos += 1
-        except Exception as exc:  # Never allow an exception to kill the audio callback silently.
+                        self._current_pos += pre
+                        output_pos += pre
+                        continue
+
+                    # Render the overlap as one vectorised audio block. EQ is
+                    # compiled DSP; Python only schedules the slowly changing
+                    # gains once per callback block.
+                    overlap = min(remaining, len(self._current) - self._current_pos)
+                    a_start = self._current_pos
+                    a_block = self._current[a_start:a_start + overlap]
+                    b_start = self._next_pos
+                    b_block = np.zeros((overlap, CHANNELS), dtype=np.float32)
+                    available = max(0, min(overlap, len(self._next) - b_start))
+                    if available:
+                        b_block[:available] = self._next[b_start:b_start + available]
+
+                    midpoint = a_start + overlap * 0.5
+                    progress = (midpoint - self._transition_start) / max(1, self._transition_length)
+                    a_low, a_mid, a_high, b_low, b_mid, b_high, a_fader, b_fader = self._profile(progress)
+                    a_processed = self._current_eq.process(a_block, (a_low, a_mid, a_high))
+                    b_processed = (self._next_eq or DeckEQ(self.sample_rate)).process(
+                        b_block, (b_low, b_mid, b_high)
+                    )
+                    # Fader gains are intentionally explicit: B is at 70% by
+                    # beat 8, reaches unity by beat 16, and A exits after beat 24.
+                    mixed = self._safe_mix(a_processed, b_processed, a_fader, b_fader)
+                    outdata[output_pos:output_pos + overlap] = mixed
+                    self._current_pos += overlap
+                    self._next_pos += overlap
+                    output_pos += overlap
+        except Exception as exc:  # Never allow an exception to kill the callback silently.
             self.callback_errors.append(repr(exc))
             outdata.fill(0)
 
@@ -687,7 +832,12 @@ class MVPDJ:
         current = prepared_current
         target_bpm = current.bpm or DEFAULT_BPM
         transition_frames = int(self.transition_beats * 60.0 / target_bpm * SAMPLE_RATE)
-        renderer = MixRenderer(first_audio, transition_frames=transition_frames)
+        renderer = MixRenderer(
+            first_audio,
+            transition_frames=transition_frames,
+            transition_beats=self.transition_beats,
+            bpm=target_bpm,
+        )
         tracks_played = 1
 
         installed_track: Optional[Track] = None
