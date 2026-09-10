@@ -25,6 +25,14 @@ class SelectorTests(unittest.TestCase):
         selector.claim(current)
         self.assertEqual(selector.choose(current).track_id, "b")
 
+    def test_variety_guard_avoids_same_artist_back_to_back(self):
+        current = Track("a", "a.wav", "A", artist="DJ One", genre="house", bpm=124)
+        same_artist = Track("b", "b.wav", "B", artist="DJ One", genre="house", bpm=124)
+        different_artist = Track("c", "c.wav", "C", artist="DJ Two", genre="house", bpm=124)
+        selector = TrackSelector([current, same_artist, different_artist])
+        selector.claim(current)
+        self.assertEqual(selector.choose(current).track_id, "c")
+
     def test_camelot_adjacent_keys_score_above_clash(self):
         self.assertGreater(_key_score("8A", "9A"), _key_score("8A", "1B"))
 

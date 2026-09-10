@@ -13,6 +13,7 @@ The MVP uses:
 - explicit genre metadata from the playlist or the first music-folder subdirectory;
 - optional BPM, Camelot key, energy, and cue-in metadata;
 - same-genre selection first, then a clearly marked fallback when the genre is exhausted;
+- an artist-variety guard to avoid the same artist back-to-back when an equally safe alternative exists;
 - a single deterministic 32-beat crossfade with compiled three-band EQ and an explicit low-end swap;
 - 44.1 kHz stereo output;
 - an on-disk cache for explicitly supplied direct URLs;
@@ -110,7 +111,8 @@ The selector prefers, in order:
 2. the same explicit genre;
 3. BPM within a small difference window;
 4. compatible Camelot keys when supplied;
-5. a small energy change rather than a sudden jump.
+5. a different artist when an equally safe option exists;
+6. a small energy change rather than a sudden jump.
 
 Unknown genre is not treated as compatible with every genre. If no same-genre track remains, the next least-bad candidate is used only as a fallback.
 

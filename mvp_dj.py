@@ -244,9 +244,18 @@ class TrackSelector:
         self.tracks = list(tracks)
         self.strict_genre = strict_genre
         self._claimed: set[str] = set()
+        self._recent_artists: list[str] = []
+        self._recent_energies: list[float] = []
 
     def claim(self, track: Track) -> None:
         self._claimed.add(track.track_id)
+        artist = _artist_key(track.artist)
+        if artist:
+            self._recent_artists = [item for item in self._recent_artists if item != artist]
+            self._recent_artists.append(artist)
+            self._recent_artists = self._recent_artists[-3:]
+        self._recent_energies.append(track.energy)
+        self._recent_energies = self._recent_energies[-3:]
 
     def release(self, track: Track) -> None:
         self._claimed.discard(track.track_id)
@@ -305,10 +314,37 @@ class TrackSelector:
                 score -= min(25.0, diff * 2.0)
 
         score += _key_score(current.key, candidate.key)
-        score += max(0.0, 10.0 - abs(current.energy - candidate.energy) * 12.0)
+        energy_delta = abs(current.energy - candidate.energy)
+        score += max(0.0, 10.0 - energy_delta * 12.0)
+
+        # Low-risk variety: do not play the same artist back-to-back when an
+        # equally compatible alternative exists. This changes selection only;
+        # it never compromises genre or tempo safety.
+        candidate_artist = _artist_key(candidate.artist)
+        current_artist = _artist_key(current.artist)
+        if candidate_artist and candidate_artist == current_artist:
+            score -= 18.0
+        elif candidate_artist and candidate_artist in self._recent_artists[-2:]:
+            score -= 7.0
+
+        # If the last couple of claimed tracks have been flat in energy, give a
+        # small bonus to a nearby lift/drop. Large jumps remain penalised by the
+        # normal energy score above.
+        if len(self._recent_energies) >= 2:
+            recent_span = max(self._recent_energies[-2:]) - min(self._recent_energies[-2:])
+            if recent_span < 0.08:
+                if 0.12 <= energy_delta <= 0.35:
+                    score += 5.0
+                elif energy_delta < 0.08:
+                    score -= 2.0
+
         if candidate.duration is not None and candidate.duration >= 120.0:
             score += 3.0
         return score
+
+
+def _artist_key(value: str) -> str:
+    return re.sub(r"\\s+", " ", (value or "").strip().lower())
 
 
 def _same_genre(a: Track, b: Track) -> bool:
