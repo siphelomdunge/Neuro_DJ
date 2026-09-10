@@ -80,6 +80,22 @@ python -m venv .venv
 python -m pip install -r requirements-mvp.txt
 ```
 
+If `python` is from Miniconda/Anaconda and `venv` hangs in `ensurepip`, use a clean environment instead:
+
+```bash
+conda create -n neuro-dj python=3.11 -y
+conda activate neuro-dj
+python -m pip install --upgrade pip
+python -m pip install -r requirements-mvp.txt
+```
+
+On Pop!_OS/Debian, install compressed-audio and device libraries once:
+
+```bash
+sudo apt update
+sudo apt install -y ffmpeg libsndfile1 portaudio19-dev
+```
+
 For compressed audio, install `ffmpeg` separately and put it on `PATH`.
 
 Preview the order without playing audio:

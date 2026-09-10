@@ -32,6 +32,22 @@ python -m venv .venv
 python -m pip install -r requirements-mvp.txt
 ```
 
+If `python` is coming from Miniconda/Anaconda and `python -m venv .venv` hangs inside `ensurepip`, use a clean Conda environment instead:
+
+```bash
+conda create -n neuro-dj python=3.11 -y
+conda activate neuro-dj
+python -m pip install --upgrade pip
+python -m pip install -r requirements-mvp.txt
+```
+
+Python 3.11 is recommended for the party setup because it has the broadest audio-package compatibility. On Pop!_OS/Debian, install the system audio libraries once:
+
+```bash
+sudo apt update
+sudo apt install -y ffmpeg libsndfile1 portaudio19-dev
+```
+
 For MP3, AAC, M4A, and other compressed formats, install `ffmpeg` and make sure it is on `PATH`. WAV files can be decoded directly by `soundfile`.
 
 ## Prepare a reliable crate
