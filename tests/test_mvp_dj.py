@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mvp_dj import Track, TrackSelector, _key_score, discover_folder, load_m3u, load_playlist
+from mvp_dj import Track, TrackSelector, _key_score, discover_folder, load_m3u, load_playlist, load_xspf
 
 
 class SelectorTests(unittest.TestCase):
@@ -93,6 +93,28 @@ class InputTests(unittest.TestCase):
             tracks = load_m3u(playlist)
             self.assertEqual([track.title for track in tracks], ["First", "Second"])
             self.assertEqual([track.artist for track in tracks], ["DJ One", "DJ Two"])
+
+    def test_xspf_loads_file_urls_in_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.wav"
+            second = root / "second.wav"
+            first.touch()
+            second.touch()
+            playlist = root / "party.xspf"
+            playlist.write_text(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<playlist xmlns=\"http://xspf.org/ns/0/\" version=\"1\">"
+                "<trackList>"
+                f"<track><location>{first.as_uri()}</location><title>First</title><creator>DJ One</creator></track>"
+                f"<track><location>{second.as_uri()}</location><title>Second</title><creator>DJ Two</creator></track>"
+                "</trackList></playlist>",
+                encoding="utf-8",
+            )
+            tracks = load_xspf(playlist)
+            self.assertEqual([track.title for track in tracks], ["First", "Second"])
+            self.assertEqual([track.artist for track in tracks], ["DJ One", "DJ Two"])
+            self.assertEqual(Path(tracks[0].source), first)
 
 
 if __name__ == "__main__":

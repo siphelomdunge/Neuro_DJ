@@ -20,12 +20,13 @@ Examples:
   python mvp_dj.py --folder ./music --transition-beats 32
   python mvp_dj.py --playlist mvp_playlist.json --cache-dir .mvp_cache
 
-A playlist can be JSON or a standard M3U/M3U8 file. JSON can be a list or
+A playlist can be JSON, standard M3U/M3U8, or XSPF. JSON can be a list or
 {"tracks": [...]}. Each JSON track can contain path or url, title, artist,
 genre, bpm, key, cue_in and energy. M3U entries preserve their file order and
-can use #EXTINF artist/title metadata. A URL must be a direct, legally playable
-audio URL supplied by the provider; this runner does not bypass provider
-authentication or download protections.
+can use #EXTINF artist/title metadata. XSPF files exported by VLC and similar
+players are read from their track locations. A URL must be a direct, legally
+playable audio URL supplied by the provider; this runner does not bypass
+provider authentication or download protections.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ import subprocess
 import sys
 import threading
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Optional, Union
@@ -271,10 +273,65 @@ def load_m3u(path: PathLike) -> list[Track]:
     return tracks
 
 
+def load_xspf(path: PathLike) -> list[Track]:
+    """Load XSPF playlists exported by VLC and other music players."""
+    playlist_path = Path(path).expanduser().resolve()
+    try:
+        root = ET.fromstring(playlist_path.read_text(encoding="utf-8", errors="replace"))
+    except FileNotFoundError as exc:
+        raise MVPError(f"Playlist does not exist: {playlist_path}") from exc
+    except ET.ParseError as exc:
+        raise MVPError(f"Invalid XSPF playlist: {exc}") from exc
+
+    def child_text(element: ET.Element, name: str) -> str:
+        for child in element:
+            if child.tag.rsplit("}", 1)[-1] == name:
+                return (child.text or "").strip()
+        return ""
+
+    tracks: list[Track] = []
+    for element in root.iter():
+        if element.tag.rsplit("}", 1)[-1] != "track":
+            continue
+        location = child_text(element, "location")
+        if not location:
+            continue
+
+        parsed = urlparse(location)
+        is_http = parsed.scheme.lower() in {"http", "https"}
+        if parsed.scheme.lower() == "file":
+            # XSPF commonly stores local files as file:///absolute/path.
+            if parsed.netloc and parsed.netloc not in {"", "localhost"}:
+                location = f"//{parsed.netloc}{unquote(parsed.path)}"
+            else:
+                location = unquote(parsed.path)
+            is_http = False
+
+        value: dict[str, Any] = {
+            "url" if is_http else "path": location,
+            "title": child_text(element, "title"),
+            "artist": child_text(element, "creator") or child_text(element, "artist"),
+            "genre": child_text(element, "genre"),
+            "key": child_text(element, "key"),
+            "bpm": child_text(element, "bpm"),
+            "cue_in": child_text(element, "cue_in") or child_text(element, "cue-in"),
+        }
+        duration_ms = _coerce_float(child_text(element, "duration"), None)
+        if duration_ms is not None:
+            value["duration"] = duration_ms / 1000.0
+        tracks.append(Track.from_mapping(value, base_dir=playlist_path.parent))
+
+    if not tracks:
+        raise MVPError(f"XSPF playlist contains no playable tracks: {playlist_path}")
+    return tracks
+
+
 def load_playlist(path: PathLike) -> list[Track]:
     playlist_path = Path(path).expanduser().resolve()
     if playlist_path.suffix.lower() in {".m3u", ".m3u8"}:
         return load_m3u(playlist_path)
+    if playlist_path.suffix.lower() == ".xspf":
+        return load_xspf(playlist_path)
     try:
         payload = json.loads(playlist_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -1140,7 +1197,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the deterministic Neuro-DJ safe MVP")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--folder", help="Music folder; first subfolder is used as genre")
-    source.add_argument("--playlist", help="JSON or M3U/M3U8 playlist containing local paths or direct URLs")
+    source.add_argument("--playlist", help="JSON, M3U/M3U8, or XSPF playlist containing local paths or direct URLs")
     parser.add_argument("--cache-dir", default=".mvp_cache", help="Cache directory for online tracks")
     parser.add_argument("--transition-beats", type=int, default=DEFAULT_TRANSITION_BEATS)
     parser.add_argument("--allow-cross-genre", action="store_true", help="Use another genre only if needed")

@@ -69,7 +69,7 @@ music/
 
 The first subdirectory is used as the genre. BPM is not guessed by the MVP. Supply it in a playlist JSON, use a previously generated `master_library.json`, or include `bpm` in the filename, for example `song_bpm_123.wav`.
 
-A playlist can be a standard `.m3u`/`.m3u8` file or JSON. M3U is the easiest option when you want to build a playlist in VLC, Rhythmbox, Strawberry, a file manager, or another music application. It preserves the order from the playlist:
+A playlist can be a standard `.m3u`/`.m3u8` file, an `.xspf` file exported by VLC, or JSON. M3U/XSPF is the easiest option when you want to build a playlist in VLC, Rhythmbox, Strawberry, a file manager, or another music application. It preserves the order from the playlist:
 
 ```text
 #EXTM3U

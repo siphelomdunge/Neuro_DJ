@@ -112,6 +112,8 @@ Run the safe MVP:
 python mvp_dj.py --folder ./music --transition-beats 32
 # or a standard playlist exported by VLC/Rhythmbox/etc.
 python mvp_dj.py --playlist party.m3u --manual-order --transition-beats 32
+# VLC XSPF playlists are supported too
+python mvp_dj.py --playlist ~/Music/shubile.xspf --watch-playlist --manual-order --transition-beats 32
 # or a JSON queue with live updates
 python mvp_dj.py --playlist party.json --cache-dir .mvp_cache --transition-beats 32 --watch-playlist
 ```
