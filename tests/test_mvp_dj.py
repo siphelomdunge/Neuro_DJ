@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mvp_dj import Track, TrackSelector, _key_score, discover_folder, load_playlist
+from mvp_dj import Track, TrackSelector, _key_score, discover_folder, load_m3u, load_playlist
 
 
 class SelectorTests(unittest.TestCase):
@@ -78,6 +78,21 @@ class InputTests(unittest.TestCase):
             tracks = discover_folder(root)
             self.assertEqual(tracks[0].genre, "house")
             self.assertEqual(tracks[0].bpm, 124.0)
+
+    def test_m3u_preserves_order_and_extinf_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "first.wav").touch()
+            (root / "second.wav").touch()
+            playlist = root / "party.m3u"
+            playlist.write_text(
+                "#EXTM3U\n#EXTINF:-1,DJ One - First\nfirst.wav\n"
+                "#EXTINF:-1,DJ Two - Second\nsecond.wav\n",
+                encoding="utf-8",
+            )
+            tracks = load_m3u(playlist)
+            self.assertEqual([track.title for track in tracks], ["First", "Second"])
+            self.assertEqual([track.artist for track in tracks], ["DJ One", "DJ Two"])
 
 
 if __name__ == "__main__":

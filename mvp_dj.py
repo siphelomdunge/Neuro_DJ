@@ -20,10 +20,12 @@ Examples:
   python mvp_dj.py --folder ./music --transition-beats 32
   python mvp_dj.py --playlist mvp_playlist.json --cache-dir .mvp_cache
 
-A playlist JSON file is either a list or {"tracks": [...]}. Each track can
-contain path or url, title, artist, genre, bpm, key, cue_in and energy. A URL
-must be a direct, legally playable audio URL supplied by the provider; this
-runner does not bypass provider authentication or download protections.
+A playlist can be JSON or a standard M3U/M3U8 file. JSON can be a list or
+{"tracks": [...]}. Each JSON track can contain path or url, title, artist,
+genre, bpm, key, cue_in and energy. M3U entries preserve their file order and
+can use #EXTINF artist/title metadata. A URL must be a direct, legally playable
+audio URL supplied by the provider; this runner does not bypass provider
+authentication or download protections.
 """
 
 from __future__ import annotations
@@ -214,8 +216,65 @@ def discover_folder(folder: PathLike) -> list[Track]:
     return tracks
 
 
+def load_m3u(path: PathLike) -> list[Track]:
+    """Load a standard M3U/M3U8 playlist without requiring JSON editing."""
+    playlist_path = Path(path).expanduser().resolve()
+    try:
+        lines = playlist_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    except FileNotFoundError as exc:
+        raise MVPError(f"Playlist does not exist: {playlist_path}") from exc
+
+    tracks: list[Track] = []
+    pending_title = ""
+    pending_artist = ""
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.upper() == "#EXTM3U":
+            continue
+        if line.upper().startswith("#EXTINF:"):
+            description = line.split(",", 1)[1].strip() if "," in line else ""
+            if " - " in description:
+                pending_artist, pending_title = description.split(" - ", 1)
+            else:
+                pending_artist, pending_title = "", description
+            continue
+        if line.startswith("#"):
+            continue
+
+        is_url = line.startswith(("http://", "https://"))
+        if is_url:
+            source = line
+            genre_hint = "open"
+        else:
+            source_path = Path(line).expanduser()
+            if not source_path.is_absolute():
+                source_path = playlist_path.parent / source_path
+            source_path = source_path.resolve()
+            source = str(source_path)
+            genre_hint = _folder_genre(source_path, playlist_path.parent)
+
+        tracks.append(
+            Track.from_mapping(
+                {
+                    "path" if not is_url else "url": source,
+                    "title": pending_title,
+                    "artist": pending_artist,
+                },
+                genre_hint=genre_hint,
+            )
+        )
+        pending_title = ""
+        pending_artist = ""
+
+    if not tracks:
+        raise MVPError(f"Playlist contains no playable entries: {playlist_path}")
+    return tracks
+
+
 def load_playlist(path: PathLike) -> list[Track]:
     playlist_path = Path(path).expanduser().resolve()
+    if playlist_path.suffix.lower() in {".m3u", ".m3u8"}:
+        return load_m3u(playlist_path)
     try:
         payload = json.loads(playlist_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -1045,7 +1104,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the deterministic Neuro-DJ safe MVP")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--folder", help="Music folder; first subfolder is used as genre")
-    source.add_argument("--playlist", help="JSON playlist containing local paths or direct URLs")
+    source.add_argument("--playlist", help="JSON or M3U/M3U8 playlist containing local paths or direct URLs")
     parser.add_argument("--cache-dir", default=".mvp_cache", help="Cache directory for online tracks")
     parser.add_argument("--transition-beats", type=int, default=DEFAULT_TRANSITION_BEATS)
     parser.add_argument("--allow-cross-genre", action="store_true", help="Use another genre only if needed")

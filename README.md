@@ -110,11 +110,13 @@ Run the safe MVP:
 
 ```bash
 python mvp_dj.py --folder ./music --transition-beats 32
-# or
+# or a standard playlist exported by VLC/Rhythmbox/etc.
+python mvp_dj.py --playlist party.m3u --manual-order --transition-beats 32
+# or a JSON queue with live updates
 python mvp_dj.py --playlist party.json --cache-dir .mvp_cache --transition-beats 32 --watch-playlist
 ```
 
-With `--watch-playlist`, append tracks to the JSON queue while the set runs. They are validated and cached only when they become candidates. See [`MVP.md`](MVP.md) for the folder layout, playlist schema, online-cache behavior, and party checklist. URLs must be direct, legally playable audio URLs supplied by a provider; this project does not bypass provider authentication or download protections.
+M3U/M3U8 playlists preserve the order you create in your music player, so you do not need to write JSON. With `--watch-playlist`, append tracks to the JSON or M3U queue while the set runs. They are validated and cached only when they become candidates. See [`MVP.md`](MVP.md) for the folder layout, playlist formats, online-cache behavior, and party checklist. URLs must be direct, legally playable audio URLs supplied by a provider; this project does not bypass provider authentication or download protections.
 
 ## 🛠️ Experimental engine installation
 

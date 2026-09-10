@@ -69,7 +69,23 @@ music/
 
 The first subdirectory is used as the genre. BPM is not guessed by the MVP. Supply it in a playlist JSON, use a previously generated `master_library.json`, or include `bpm` in the filename, for example `song_bpm_123.wav`.
 
-A playlist can contain local paths and direct URLs:
+A playlist can be a standard `.m3u`/`.m3u8` file or JSON. M3U is the easiest option when you want to build a playlist in VLC, Rhythmbox, Strawberry, a file manager, or another music application. It preserves the order from the playlist:
+
+```text
+#EXTM3U
+#EXTINF:-1,DJ One - First Track
+/home/siphelo/Music/house/first.mp3
+#EXTINF:-1,DJ Two - Second Track
+/home/siphelo/Music/house/second.mp3
+```
+
+Run an M3U playlist in exact order:
+
+```bash
+python mvp_dj.py --playlist party.m3u --manual-order --transition-beats 32
+```
+
+JSON is still supported for detailed BPM/key/cue metadata:
 
 ```json
 {
