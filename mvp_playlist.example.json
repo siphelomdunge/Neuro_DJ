@@ -1,0 +1,34 @@
+{
+  "tracks": [
+    {
+      "path": "music/afro-house/01-opener.wav",
+      "title": "Opener",
+      "artist": "Your Artist",
+      "genre": "afro-house",
+      "bpm": 122,
+      "key": "8A",
+      "energy": 0.55,
+      "cue_in": 0
+    },
+    {
+      "path": "music/afro-house/02-groove.wav",
+      "title": "Groove",
+      "artist": "Your Artist",
+      "genre": "afro-house",
+      "bpm": 123,
+      "key": "9A",
+      "energy": 0.65,
+      "cue_in": 0
+    },
+    {
+      "url": "https://example.com/your-authorized-direct-audio-url.mp3",
+      "title": "Online Track",
+      "artist": "Licensed Source",
+      "genre": "afro-house",
+      "bpm": 124,
+      "key": "9B",
+      "energy": 0.72,
+      "cue_in": 0
+    }
+  ]
+}

@@ -1,5 +1,7 @@
 🧠 Neuro-DJ: Dynamic Technique Intelligence
 
+> **Party-safe MVP:** Use [`mvp_dj.py`](MVP.md) for a deterministic, conservative runner. It uses explicit genres, optional BPM/key metadata, background caching, and club/smooth transition profiles. The original `neuro_gui.py` engine remains experimental and is not the recommended path for an unattended party.
+
 Neuro-DJ is an autonomous, hybrid AI DJ engine designed to replicate mainstage, producer-level mixing logic. It goes beyond simple beatmatching and crossfading by actively analyzing the acoustic context of tracks (density, vocals, tension, genre) to dynamically select the most mathematically and musically appropriate transition technique in real-time.
 
 Built with a high-performance C++ audio core and a Python intelligence layer, Neuro-DJ features live telemetry, zero-latency stem extraction, dynamic stall detection, and a reinforcement learning (RLHF) loop to adapt to human feedback.
@@ -18,7 +20,9 @@ Rather than just writing raw code, my focus was on high-level system orchestrati
 
 -----
 
-## 🚀 Key Features
+## 🧪 Experimental engine features (legacy)
+
+The following section describes the original research engine. These features are intentionally not used by the safe MVP because they have a larger dependency/build surface and need further real-audio testing.
 
   * **Acoustic Context Awareness:** Analyzes track structures, vocal regions, harmonic density, and tension scores to determine the "Dance Moment" (e.g., *controlled\_rebuild*, *vocal\_relief*, *peak\_swap*).
   * **Dynamic Technique Selection:** Chooses from a library of professional techniques based on acoustic context and runway:
@@ -55,7 +59,68 @@ Neuro-DJ operates on a dual-layer architecture:
 
 -----
 
-## 🛠️ Installation & Setup
+## ✅ Safe MVP: recommended playback path
+
+The repository now includes a deliberately small playback path in `mvp_dj.py`. It is designed for reliability rather than experimental technique selection:
+
+- no phrase/HPSS analysis in the live path;
+- automatic same-genre/BPM/key/energy scoring with artist variety, or exact manual playlist order;
+- 44.1 kHz stereo conversion and conservative loudness normalization;
+- a deterministic club/amapiano bass-swap profile plus a gentler smooth profile for R&B and vocal-heavy material;
+- background preparation of the next local or explicitly supplied direct URL track;
+- cache and end-hold fallback when an online track is late;
+- no network or disk work in the audio callback.
+
+Install the MVP dependencies:
+
+```bash
+python -m venv .venv
+# Windows: .venv\\Scripts\\activate
+# macOS/Linux: source .venv/bin/activate
+python -m pip install -r requirements-mvp.txt
+```
+
+If `python` is from Miniconda/Anaconda and `venv` hangs in `ensurepip`, use a clean environment instead:
+
+```bash
+conda create -n neuro-dj python=3.11 -y
+conda activate neuro-dj
+python -m pip install --upgrade pip
+python -m pip install -r requirements-mvp.txt
+```
+
+On Pop!_OS/Debian, install compressed-audio and device libraries once:
+
+```bash
+sudo apt update
+sudo apt install -y ffmpeg libsndfile1 portaudio19-dev
+```
+
+For compressed audio, install `ffmpeg` separately and put it on `PATH`.
+
+Preview the order without playing audio:
+
+```bash
+python mvp_dj.py --folder ./music --dry-run
+# or
+python mvp_dj.py --playlist mvp_playlist.example.json --dry-run
+```
+
+Run the safe MVP:
+
+```bash
+python mvp_dj.py --folder ./music --transition-beats 32
+# or a standard playlist exported by VLC/Rhythmbox/etc.
+python mvp_dj.py --playlist party.m3u --manual-order --transition-beats 32
+# VLC XSPF playlists are supported too
+python mvp_dj.py --playlist ~/Music/shubile.xspf --watch-playlist --manual-order --transition-beats 32
+# or a JSON queue with live updates
+python mvp_dj.py --playlist party.json --cache-dir .mvp_cache --transition-beats 32 --watch-playlist
+```
+
+M3U/M3U8 playlists preserve the order you create in your music player, so you do not need to write JSON. With `--watch-playlist`, append tracks to the JSON or M3U queue while the set runs. They are validated and cached only when they become candidates. During playback, type `p` + Enter to pause/resume or `q` + Enter to stop. See [`MVP.md`](MVP.md) for the folder layout, playlist formats, online-cache behavior, and party checklist. URLs must be direct, legally playable audio URLs supplied by a provider; this project does not bypass provider authentication or download protections.
+
+## 🛠️ Experimental engine installation
 
 ### 1\. Prerequisites
 
