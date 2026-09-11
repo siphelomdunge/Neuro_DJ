@@ -170,12 +170,20 @@ python mvp_dj.py --playlist party.json --watch-playlist --transition-beats 32
 
 The file is polled safely; a partially-written JSON file is retried without interrupting audio. Newly added tracks are only cached when they become the next candidate.
 
-A 32-beat transition is a conservative starting point. At 120 BPM it is approximately 16 seconds. The MVP's audible transition profile is:
+For club/amapiano material, a 32-beat transition is a conservative starting point. At 120 BPM it is approximately 16 seconds. The MVP's club transition profile is:
 
 - beats 1–8: B fader rises to 70%, B low is fully cut, and B highs stay restrained;
 - beats 9–16: B reaches unity, B mids/highs open, and A highs soften;
 - beats 17–24: B low rises gently while A low is reduced;
 - beats 25–32: A fades, then B low completes the swap on beat 32.
+
+For R&B, soul, pop or vocal-heavy playlists, use the gentler smooth profile:
+
+```bash
+python mvp_dj.py --playlist rnb.xspf --manual-order --style smooth --transition-beats 16
+```
+
+The smooth profile uses a shorter blend, avoids the dramatic bass slam, and keeps the incoming low end mostly present instead of applying the amapiano log-drum swap. It is safer for sparse arrangements and exposed vocals.
 
 The MVP does not create a separate headphone cue mix. It assumes the supplied `cue_in` or first sample is the intended phrase entry. Use an explicit `cue_in` in the playlist when a file has leading silence.
 

@@ -718,11 +718,13 @@ class MixRenderer:
         transition_beats: int = DEFAULT_TRANSITION_BEATS,
         bpm: float = DEFAULT_BPM,
         sample_rate: int = SAMPLE_RATE,
+        mix_style: str = "club",
     ):
         self.sample_rate = sample_rate
         self.transition_frames = max(1, int(transition_frames))
         self.transition_beats = max(8, int(transition_beats))
         self.bpm = max(1.0, float(bpm))
+        self.mix_style = mix_style if mix_style in {"club", "smooth"} else "club"
         self._frames_per_beat = self.sample_rate * 60.0 / self.bpm
         self._lock = threading.Lock()
         self._current = first
@@ -755,6 +757,20 @@ class MixRenderer:
           17-24: B teases in low end and A makes room;
           25-32: A fades and the low-end swap completes on beat 32.
         """
+        if self.mix_style == "smooth":
+            # R&B/pop material often has no clean log-drum phrase. Use a
+            # shorter, gentle equal-power blend with no dramatic bass cut or
+            # final slam. This is safer for vocals and sparse arrangements.
+            t = min(1.0, max(0.0, progress))
+            eased = self._smoothstep(t)
+            a_fader = math.cos(t * math.pi / 2.0)
+            b_fader = math.sin(t * math.pi / 2.0)
+            b_low = 0.72 + 0.28 * self._smoothstep(min(1.0, t * 1.5))
+            b_mid = 0.78 + 0.22 * eased
+            b_high = 0.82 + 0.18 * eased
+            a_high = 1.0 - 0.12 * eased
+            return 1.0, 1.0, a_high, b_low, b_mid, b_high, a_fader, b_fader
+
         beat = min(float(self.transition_beats), max(0.0, progress * self.transition_beats))
         a_low = a_mid = a_high = 1.0
         b_low = 0.0
@@ -945,6 +961,7 @@ class MVPDJ:
         playlist_path: Optional[PathLike] = None,
         max_tracks: Optional[int] = None,
         manual_order: bool = False,
+        mix_style: str = "club",
     ):
         if not tracks:
             raise MVPError("No tracks supplied")
@@ -956,6 +973,7 @@ class MVPDJ:
             manual_order=manual_order,
         )
         self.transition_beats = max(8, int(transition_beats))
+        self.mix_style = mix_style if mix_style in {"club", "smooth"} else "club"
         self.repeat = repeat
         self.playlist_path = Path(playlist_path).expanduser().resolve() if playlist_path else None
         self.max_tracks = max_tracks if max_tracks is None or max_tracks > 0 else None
@@ -1038,6 +1056,7 @@ class MVPDJ:
             transition_frames=transition_frames,
             transition_beats=self.transition_beats,
             bpm=target_bpm,
+            mix_style=self.mix_style,
         )
         tracks_played = 1
 
@@ -1200,6 +1219,12 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--playlist", help="JSON, M3U/M3U8, or XSPF playlist containing local paths or direct URLs")
     parser.add_argument("--cache-dir", default=".mvp_cache", help="Cache directory for online tracks")
     parser.add_argument("--transition-beats", type=int, default=DEFAULT_TRANSITION_BEATS)
+    parser.add_argument(
+        "--style",
+        choices=("club", "smooth"),
+        default="club",
+        help="club=32-beat bass swap; smooth=gentler vocal/R&B blend",
+    )
     parser.add_argument("--allow-cross-genre", action="store_true", help="Use another genre only if needed")
     parser.add_argument("--manual-order", action="store_true", help="Play playlist/folder order exactly; do not select by compatibility")
     parser.add_argument("--repeat", action="store_true", help="Reuse tracks when the crate is exhausted")
@@ -1241,6 +1266,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             playlist_path=args.playlist if args.watch_playlist else None,
             max_tracks=args.max_tracks,
             manual_order=args.manual_order,
+            mix_style=args.style,
         )
         signal.signal(signal.SIGINT, lambda *_: dj.stop())
         dj.run()

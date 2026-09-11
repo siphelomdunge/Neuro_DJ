@@ -1,6 +1,6 @@
 🧠 Neuro-DJ: Dynamic Technique Intelligence
 
-> **Party-safe MVP:** Use [`mvp_dj.py`](MVP.md) for a deterministic, conservative runner. It uses explicit genres, optional BPM/key metadata, background caching, and one fixed equal-power crossfade. The original `neuro_gui.py` engine remains experimental and is not the recommended path for an unattended party.
+> **Party-safe MVP:** Use [`mvp_dj.py`](MVP.md) for a deterministic, conservative runner. It uses explicit genres, optional BPM/key metadata, background caching, and club/smooth transition profiles. The original `neuro_gui.py` engine remains experimental and is not the recommended path for an unattended party.
 
 Neuro-DJ is an autonomous, hybrid AI DJ engine designed to replicate mainstage, producer-level mixing logic. It goes beyond simple beatmatching and crossfading by actively analyzing the acoustic context of tracks (density, vocals, tension, genre) to dynamically select the most mathematically and musically appropriate transition technique in real-time.
 
@@ -66,7 +66,7 @@ The repository now includes a deliberately small playback path in `mvp_dj.py`. I
 - no phrase/HPSS analysis in the live path;
 - automatic same-genre/BPM/key/energy scoring with artist variety, or exact manual playlist order;
 - 44.1 kHz stereo conversion and conservative loudness normalization;
-- one deterministic equal-power crossfade;
+- a deterministic club/amapiano bass-swap profile plus a gentler smooth profile for R&B and vocal-heavy material;
 - background preparation of the next local or explicitly supplied direct URL track;
 - cache and end-hold fallback when an online track is late;
 - no network or disk work in the audio callback.
