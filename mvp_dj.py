@@ -12,13 +12,15 @@ Design rules:
   * only the next track is downloaded/decoded in the background;
   * genre is explicit (playlist metadata or the folder name);
   * BPM/key are optional metadata, never guessed with expensive analysis;
-  * transitions use one fixed equal-power crossfade;
+  * transitions use deterministic club or smooth crossfade profiles;
+  * recording uses a bounded background writer, never disk I/O in the callback;
   * a local/cache fallback is preferred over an ambitious effect.
 
 Examples:
   python mvp_dj.py --folder ./music --dry-run
   python mvp_dj.py --folder ./music --transition-beats 32
   python mvp_dj.py --playlist mvp_playlist.json --cache-dir .mvp_cache
+  python mvp_dj.py --playlist set.xspf --manual-order --record recordings/set.wav
 
 A playlist can be JSON, standard M3U/M3U8, or XSPF. JSON can be a list or
 {"tracks": [...]}. Each JSON track can contain path or url, title, artist,
@@ -37,6 +39,7 @@ import hashlib
 import json
 import math
 import os
+import queue
 import re
 import shutil
 import signal
@@ -707,8 +710,130 @@ class DeckEQ:
         ).astype(np.float32, copy=False)
 
 
+class SetRecorder:
+    """Write the rendered output on a worker thread without blocking audio.
+
+    The sounddevice callback only copies each output block into a bounded queue.
+    All file opening and encoding stays outside the real-time callback. The
+    queue is deliberately large enough to absorb short filesystem stalls while
+    keeping the audio path non-blocking.
+    """
+
+    _SUPPORTED_EXTENSIONS = {".wav", ".flac", ".ogg", ".aif", ".aiff"}
+
+    def __init__(
+        self,
+        path: PathLike,
+        *,
+        sample_rate: int = SAMPLE_RATE,
+        channels: int = CHANNELS,
+        queue_size: int = 256,
+    ):
+        if sf is None:
+            raise AudioDependencyError(
+                "Recording needs soundfile. Install requirements-mvp.txt."
+            )
+        self.path = Path(path).expanduser().resolve()
+        if self.path.suffix.lower() not in self._SUPPORTED_EXTENSIONS:
+            supported = ", ".join(sorted(self._SUPPORTED_EXTENSIONS))
+            raise MVPError(
+                f"Unsupported recording extension {self.path.suffix or '<none>'}; "
+                f"use one of {supported}"
+            )
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.sample_rate = int(sample_rate)
+        self.channels = int(channels)
+        self._blocks: queue.Queue[object] = queue.Queue(maxsize=max(8, int(queue_size)))
+        self._sentinel = object()
+        self._ready = threading.Event()
+        self._closed = False
+        self._close_lock = threading.Lock()
+        self._error: Optional[str] = None
+        self._dropped_frames = 0
+        self._thread = threading.Thread(
+            target=self._write_loop,
+            name="neuro-dj-set-recorder",
+            daemon=True,
+        )
+        self._thread.start()
+        self._ready.wait(timeout=5.0)
+        if self._error:
+            raise MVPError(f"Could not open recording {self.path}: {self._error}")
+        if not self._ready.is_set():
+            raise MVPError(f"Timed out opening recording {self.path}")
+
+    def _write_loop(self) -> None:
+        try:
+            with sf.SoundFile(
+                str(self.path),
+                mode="w",
+                samplerate=self.sample_rate,
+                channels=self.channels,
+            ) as output:
+                self._ready.set()
+                while True:
+                    block = self._blocks.get()
+                    if block is self._sentinel:
+                        break
+                    output.write(block)
+        except Exception as exc:  # Report after playback without touching the callback.
+            self._error = repr(exc)
+            self._ready.set()
+
+    def enqueue(self, samples: np.ndarray) -> None:
+        """Queue one callback block; never wait for the filesystem."""
+        if self._closed or self._error:
+            return
+        try:
+            block = np.array(samples, dtype=np.float32, copy=True)
+            self._blocks.put_nowait(block)
+        except queue.Full:
+            self._dropped_frames += len(samples)
+        except Exception as exc:
+            self._error = repr(exc)
+
+    def close(self) -> None:
+        """Flush the writer and report recording loss, if any."""
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._error:
+                # Discard queued blocks after an error, then wake a writer that
+                # is still shutting down. Never wait forever on a full queue.
+                while True:
+                    try:
+                        self._blocks.get_nowait()
+                    except queue.Empty:
+                        break
+                if self._thread.is_alive():
+                    try:
+                        self._blocks.put_nowait(self._sentinel)
+                    except queue.Full:
+                        pass
+            else:
+                while True:
+                    try:
+                        self._blocks.put(self._sentinel, timeout=0.1)
+                        break
+                    except queue.Full:
+                        continue
+            self._thread.join(timeout=15.0)
+            if self._thread.is_alive():
+                self._error = "writer did not finish within 15 seconds"
+            if self._dropped_frames:
+                dropped_seconds = self._dropped_frames / self.sample_rate
+                self._error = (
+                    self._error or
+                    f"{self._dropped_frames} audio frames dropped "
+                    f"({dropped_seconds:.2f} seconds)"
+                )
+            if self._error:
+                raise MVPError(f"Recording incomplete for {self.path}: {self._error}")
+
+
 class MixRenderer:
-    """Two-buffer renderer with the conservative 32-beat bass-swap profile."""
+    """Two-buffer renderer with club and smooth transition profiles."""
 
     def __init__(
         self,
@@ -719,12 +844,14 @@ class MixRenderer:
         bpm: float = DEFAULT_BPM,
         sample_rate: int = SAMPLE_RATE,
         mix_style: str = "club",
+        record_sink: Optional[SetRecorder] = None,
     ):
         self.sample_rate = sample_rate
         self.transition_frames = max(1, int(transition_frames))
         self.transition_beats = max(8, int(transition_beats))
         self.bpm = max(1.0, float(bpm))
         self.mix_style = mix_style if mix_style in {"club", "smooth"} else "club"
+        self._record_sink = record_sink
         self._frames_per_beat = self.sample_rate * 60.0 / self.bpm
         self._lock = threading.Lock()
         self._current = first
@@ -873,11 +1000,18 @@ class MixRenderer:
         # Leave headroom for two full-range tracks without hard clipping.
         return (np.tanh(mixed * 0.90) / 0.90).astype(np.float32, copy=False)
 
+    def _record_output(self, outdata: np.ndarray) -> None:
+        if self._record_sink is not None:
+            self._record_sink.enqueue(outdata)
+
     def __call__(self, outdata, frames, time_info, status) -> None:  # sounddevice callback API
         try:
             outdata.fill(0)
             with self._lock:
                 if self._paused:
+                    # Preserve the audible pause as silence in the set recording
+                    # while leaving the playback position untouched.
+                    self._record_output(outdata)
                     return
                 output_pos = 0
                 while output_pos < frames:
@@ -944,9 +1078,11 @@ class MixRenderer:
                     self._current_pos += overlap
                     self._next_pos += overlap
                     output_pos += overlap
+                self._record_output(outdata)
         except Exception as exc:  # Never allow an exception to kill the callback silently.
             self.callback_errors.append(repr(exc))
             outdata.fill(0)
+            self._record_output(outdata)
 
 
 class MVPDJ:
@@ -962,6 +1098,7 @@ class MVPDJ:
         max_tracks: Optional[int] = None,
         manual_order: bool = False,
         mix_style: str = "club",
+        record_path: Optional[PathLike] = None,
     ):
         if not tracks:
             raise MVPError("No tracks supplied")
@@ -977,6 +1114,7 @@ class MVPDJ:
         self.repeat = repeat
         self.playlist_path = Path(playlist_path).expanduser().resolve() if playlist_path else None
         self.max_tracks = max_tracks if max_tracks is None or max_tracks > 0 else None
+        self.record_path = Path(record_path).expanduser().resolve() if record_path else None
         self._playlist_mtime = self.playlist_path.stat().st_mtime_ns if self.playlist_path and self.playlist_path.exists() else None
         self._playlist_error_mtime: Optional[int] = None
         self._stop = threading.Event()
@@ -1051,12 +1189,16 @@ class MVPDJ:
         current = prepared_current
         target_bpm = current.bpm or DEFAULT_BPM
         transition_frames = int(self.transition_beats * 60.0 / target_bpm * SAMPLE_RATE)
+        recorder = SetRecorder(self.record_path) if self.record_path else None
+        if recorder is not None:
+            print(f"💾 Recording set to {recorder.path}")
         renderer = MixRenderer(
             first_audio,
             transition_frames=transition_frames,
             transition_beats=self.transition_beats,
             bpm=target_bpm,
             mix_style=self.mix_style,
+            record_sink=recorder,
         )
         tracks_played = 1
 
@@ -1140,6 +1282,12 @@ class MVPDJ:
         finally:
             renderer.stop()
             executor.shutdown(wait=False, cancel_futures=True)
+            if recorder is not None:
+                try:
+                    recorder.close()
+                    print(f"✅ Set recording complete: {recorder.path}")
+                except MVPError as exc:
+                    print(f"⚠️ {exc}", file=sys.stderr)
 
     def _prepare_next(self, current: Track) -> tuple[Optional[Track], Optional[np.ndarray]]:
         # Try candidates in selector order. One corrupt file or unavailable URL
@@ -1231,6 +1379,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--watch-playlist", action="store_true", help="Import tracks appended to --playlist while running")
     parser.add_argument("--dry-run", action="store_true", help="Print the planned order without audio playback")
     parser.add_argument("--max-tracks", type=int, default=None, help="Stop live playback after this many tracks; also limits dry-run output")
+    parser.add_argument(
+        "--record",
+        metavar="PATH",
+        default=None,
+        help="Record the rendered set to a .wav, .flac, .ogg, or .aiff file",
+    )
     return parser
 
 
@@ -1267,6 +1421,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             max_tracks=args.max_tracks,
             manual_order=args.manual_order,
             mix_style=args.style,
+            record_path=args.record,
         )
         signal.signal(signal.SIGINT, lambda *_: dj.stop())
         dj.run()

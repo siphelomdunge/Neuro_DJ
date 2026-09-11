@@ -15,8 +15,9 @@ The MVP uses:
 - automatic mode: same-genre selection first, then a clearly marked fallback when the genre is exhausted;
 - an artist-variety guard to avoid the same artist back-to-back when an equally safe alternative exists;
 - manual mode: play the playlist order exactly and use Neuro-DJ only for the transitions;
-- a single deterministic 32-beat crossfade with compiled three-band EQ and an explicit low-end swap;
+- a deterministic club/amapiano 32-beat crossfade with compiled three-band EQ and an explicit low-end swap, or a gentler smooth profile for vocal/R&B material;
 - 44.1 kHz stereo output;
+- optional recording of the exact rendered output to WAV, FLAC, OGG, or AIFF on a background writer thread;
 - an on-disk cache for explicitly supplied direct URLs;
 - a local/cache fallback instead of allowing a network failure to enter the audio callback;
 - an eight-second end hold if a background download is late, rather than immediately emitting silence.
@@ -84,6 +85,23 @@ Run an M3U playlist in exact order:
 ```bash
 python mvp_dj.py --playlist party.m3u --manual-order --transition-beats 32
 ```
+
+Record the rendered set while it plays:
+
+```bash
+python mvp_dj.py \
+  --playlist party.m3u \
+  --manual-order \
+  --transition-beats 32 \
+  --record recordings/party-set.wav
+```
+
+`--record` captures the actual post-EQ, post-crossfade stereo output sent to the
+sound device. Recording is written by a background worker so the audio callback
+never performs disk I/O. If you pause playback, the recording contains silence
+for the pause; the playback position and transition state remain frozen.
+Supported output extensions are `.wav`, `.flac`, `.ogg`, `.aif`, and `.aiff`.
+Use a new path for each set because an existing file is replaced.
 
 JSON is still supported for detailed BPM/key/cue metadata:
 
